@@ -1,10 +1,11 @@
-const { ask, extractJson } = require('./llm');
+const { ask, extractJson, MODEL_DEEPSEEK, MODEL_MIMO } = require('./llm');
 const { latexToUnicode } = require('./math');
 const {
   EXPLAIN_SYSTEM_PROMPT,
   HINT_SYSTEM_PROMPT,
   ERROR_MSG,
   generateQuiz,
+  classifyComplexity,
   buildQuizKeyboard,
   buildQuestionText,
 } = require('./quiz');
@@ -217,7 +218,12 @@ function register(bot) {
         `Materi:\n${material}\n\n` +
         `Pertanyaan kuis yang DIKUNCI (JANGAN diubah):\n${quiz.question}\n\nPilihan:\n${optionsText}\n\n` +
         `Pesan user: "${userMessage}"`;
-      const reply = await ask(prompt, HINT_SYSTEM_PROMPT, { maxTokens: 400, timeoutMs: 120000 });
+      const reply = await ask(prompt, HINT_SYSTEM_PROMPT, {
+        primaryModel: MODEL_MIMO,
+        fallbackModel: MODEL_DEEPSEEK,
+        maxTokens: 250,
+        timeoutMs: 30000,
+      });
       sendSmart(bot, chatId, cleanMarkdown(reply));
     } catch (e) {
       console.error('Hint error:', e);
@@ -252,10 +258,17 @@ function register(bot) {
     try {
       const MAX_CHARS = 3000;
       const trimmed = material.slice(0, MAX_CHARS);
+      const complexity = classifyComplexity(material);
+      const isHeavy = complexity === 'heavy';
+      const primaryModel = isHeavy ? MODEL_DEEPSEEK : MODEL_MIMO;
+      const fallbackModel = isHeavy ? MODEL_MIMO : MODEL_DEEPSEEK;
+      const maxTokens = isHeavy ? 1000 : 750;
+      const timeoutMs = isHeavy ? 60000 : 45000;
+
       const explanation = await ask(
         `Materi dari user:\n\n${trimmed}`,
         EXPLAIN_SYSTEM_PROMPT,
-        { maxTokens: 2500, timeoutMs: 180000 }
+        { primaryModel, fallbackModel, maxTokens, timeoutMs }
       );
       sendSmart(bot, chatId, cleanMarkdown(explanation));
       setState(chatId, { state: 'IDLE' });

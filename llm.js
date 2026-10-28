@@ -2,19 +2,21 @@ require('dotenv').config();
 
 const OpenAI = require('openai');
 
-const TIMEOUT_MS = 90000;
+const TIMEOUT_MS = 45000;
 const ERROR_MSG = 'Server AI lagi sibuk nih, coba kirim ulang materi lu bentar lagi ya.';
 
 const client = new OpenAI({
   apiKey: process.env.AI_API_KEY,
   baseURL: process.env.AI_BASE_URL,
   timeout: TIMEOUT_MS,
-  // Network to this endpoint can be flaky (TLS drops mid-handshake)
-  maxRetries: 2,
+  // Disable SDK hidden retries so request deadlines and failovers are immediate
+  maxRetries: 0,
 });
 
-const PRIMARY_MODEL = process.env.AI_MODEL_NAME || 'deepseek-v4.1-flash:free';
-const FALLBACK_MODEL = process.env.AI_FALLBACK_MODEL_NAME || 'mimo-v2.6-flash:free';
+const MODEL_DEEPSEEK = process.env.AI_MODEL_NAME || 'deepseek-v4.1-flash:free';
+const MODEL_MIMO = process.env.AI_FALLBACK_MODEL_NAME || 'mimo-v2.6-flash:free';
+const PRIMARY_MODEL = MODEL_DEEPSEEK;
+const FALLBACK_MODEL = MODEL_MIMO;
 
 // Strip accidental markdown fences like ```json ... ```
 function stripFences(text) {
@@ -73,6 +75,7 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   try {
     const completion = await client.chat.completions.create(body, {
       signal: controller.signal,
+      timeout: timeoutMs,
     });
     return completion.choices[0].message.content || '';
   } finally {
@@ -80,19 +83,22 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   }
 }
 
-// Call the LLM with automatic fallback from Primary to Fallback model
+// Call the LLM with dynamic primary and fallback model routing
 async function ask(prompt, systemPrompt, opts = {}) {
+  const primaryModel = opts.primaryModel || MODEL_DEEPSEEK;
+  const fallbackModel = opts.fallbackModel || MODEL_MIMO;
+
   try {
-    return await executeModelCall(PRIMARY_MODEL, prompt, systemPrompt, opts);
+    return await executeModelCall(primaryModel, prompt, systemPrompt, opts);
   } catch (primaryErr) {
-    if (FALLBACK_MODEL && FALLBACK_MODEL !== PRIMARY_MODEL) {
+    if (fallbackModel && fallbackModel !== primaryModel) {
       console.warn(
-        `[LLM Fallback] Primary model "${PRIMARY_MODEL}" failed (${primaryErr.message}). Retrying with fallback "${FALLBACK_MODEL}"...`
+        `[LLM Fallback] Primary model "${primaryModel}" failed (${primaryErr.message}). Retrying with fallback "${fallbackModel}"...`
       );
       try {
-        return await executeModelCall(FALLBACK_MODEL, prompt, systemPrompt, opts);
+        return await executeModelCall(fallbackModel, prompt, systemPrompt, opts);
       } catch (fallbackErr) {
-        console.error(`[LLM Fallback] Fallback model "${FALLBACK_MODEL}" also failed:`, fallbackErr.message);
+        console.error(`[LLM Fallback] Fallback model "${fallbackModel}" also failed:`, fallbackErr.message);
         throw fallbackErr;
       }
     }
@@ -100,4 +106,14 @@ async function ask(prompt, systemPrompt, opts = {}) {
   }
 }
 
-module.exports = { ask, extractJson, stripFences, ERROR_MSG, MODEL: PRIMARY_MODEL, FALLBACK_MODEL };
+module.exports = {
+  ask,
+  extractJson,
+  stripFences,
+  ERROR_MSG,
+  MODEL: PRIMARY_MODEL,
+  PRIMARY_MODEL,
+  FALLBACK_MODEL,
+  MODEL_DEEPSEEK,
+  MODEL_MIMO,
+};

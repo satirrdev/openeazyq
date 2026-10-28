@@ -1,84 +1,59 @@
-# AGENTS.md — GampangBot (AI Exam Quiz Assistant)
+# AGENTS.md — Developer & Agent Guide for GampangBot
 
-## 1. Project Overview
-GampangBot is a lightweight Telegram Bot designed to help students prepare for exams instantly. Users send study notes, syllabi, or raw text directly into the chat, and the bot generates interactive step-by-step multiple-choice quizzes along with instant answer evaluations.
+Compact operational guide for AI agents working in this repository.
 
-**Current Phase Goal:** Validate core product utility with the first 10–20 active users at zero cost, ensuring a fast and crash-free user flow.
+## 1. Quick Reference & Commands
+- **Runtime:** Node.js v18+ (tested on Node v20/v22, CommonJS modules).
+- **Run the bot:** `node index.js` (or `npm start`).
+- **Syntax validation (fast verification):**
+  ```bash
+  node -c index.js bot.js llm.js quiz.js math.js
+  ```
+- **Single test / test script:** No formal test runner (Jest/Mocha) is installed. Run targeted verification scripts directly: `node <script_path>.js`.
 
-## 2. Tech Stack & Infrastructure
-- **Runtime:** Node.js (v18+ or v20 LTS)
-- **Bot Framework:** `node-telegram-bot-api` (Long Polling for local dev, Webhook for production)
-- **LLM Engine:** OpenAI-compatible API via TokenHarbor / Cloudflare Workers AI
-- **LLM Client:** `openai` npm package (configured with custom `baseURL`)
-- **State Management:** In-Memory Map (MVP phase) or lightweight SQLite / Supabase free tier
-- **Hosting Target:** Localhost (testing) -> Render.com Free Tier (deployment)
+## 2. Architecture & File Roles
+```
+index.js  --> Entry point: loads .env, initializes TelegramBot long-polling, attaches error handler.
+bot.js    --> Bot event wiring (message, callback_query), in-memory chat state machine, sendSmart wrapper.
+llm.js    --> OpenAI client instance, ask() with primary-to-fallback failover, extractJson() auto-repair.
+quiz.js   --> System prompts (quiz, explain, hint), quiz generator with JSON validation/retry, keyboard builders.
+math.js   --> latexToUnicode() regex pipeline converting LaTeX syntax into clean Unicode for Telegram.
+```
 
 ## 3. Environment Variables (.env)
-Ensure the following environment variables are configured before starting the service:
+Required keys in `.env` (never commit `.env`):
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather.
+- `AI_BASE_URL`: OpenAI-compatible endpoint (e.g., `https://api.tokenharbor.com/v1`).
+- `AI_API_KEY`: API key for the AI provider.
+- `AI_MODEL_NAME`: Primary model ID (defaults to `deepseek-v4.1-flash:free` if unset).
+- `AI_FALLBACK_MODEL_NAME`: Automatic failover model (defaults to `mimo-v2.6-flash:free`).
+- `PORT`: Optional port (defaults to 3000).
 
-TELEGRAM_BOT_TOKEN="8389589935:AAFWqSAKWKIFHf1wZJDbHTBNdWwUOZ36LBU"
-AI_BASE_URL="https://api.tokenharbor.com/v1"
-AI_API_KEY="thk_live_0TIh8dd353QvJbG9qwxizHcREnp9Pal-btQfvI8FvuMYTN_fbH2Zll6nGrBmq14N"
-AI_MODEL_NAME="mimo-v2.6-flash:free"
-PORT=3000
+## 4. State Machine & Concurrency Guardrails
+State is stored in an in-memory Map in `bot.js` keyed by `chatId`.
+- **States:** `IDLE`, `QUIZ_ACTIVE`, `EXPLAIN_ACTIVE`, `AWAITING_ANSWER`, `QUIZ_DONE`.
+- **Concurrency Locks:** While state is `QUIZ_ACTIVE` or `EXPLAIN_ACTIVE`, ignore new clicks/messages and notify the user (`"Sabar ya, lagi diproses nih... ⏳"`).
+- **Locked Quiz State (`AWAITING_ANSWER`):** When waiting for an answer to an active quiz, any text message routes to `handleHint()`. The question remains locked; never overwrite or regenerate an unanswered question unless explicitly reset.
+- **Double-click Prevention:** Answer buttons (`ANS_*`) transition immediately to `QUIZ_DONE` and wipe reply markup.
 
-## 4. System Prompts & Output Schemas
+## 5. Telegram Formatting & Markdown Quirks
+Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse entities` on unescaped symbols (`_`, `*`, `[`, `` ` ``) frequently produced in math or LLM answers.
+- **Always send via `sendSmart(bot, chatId, text, opts)`:**
+  1. Converts LaTeX to Unicode via `latexToUnicode()` in `math.js`.
+  2. Attempts Markdown delivery.
+  3. Catches entity parse errors and falls back to plain text with formatting tokens stripped.
+- Clean raw LLM text with `cleanMarkdown()` before sending to strip stray fences and convert Markdown headings (`#`) to bold (`**`).
 
-### A. Quiz Generator Prompt (Role: Quiz Maker)
-Triggered when a user sends study material or text notes:
-
-You are GampangBot, an objective and concise exam quiz generator for students.
-Task: Create EXACTLY 1 multiple-choice question based on the study material provided by the user.
-
-Strict Output Rules:
-1. You MUST return ONLY valid raw JSON without markdown code blocks or backticks.
-2. Required JSON Schema:
-{
-  "question": "Pertanyaan yang menguji pemahaman konsep",
-  "options": {
-    "A": "Teks pilihan A",
-    "B": "Teks pilihan B",
-    "C": "Teks pilihan C",
-    "D": "Teks pilihan D"
-  },
-  "correct_answer": "A",
-  "explanation": "Penjelasan singkat 1-2 kalimat kenapa jawaban tersebut benar."
-}
-3. Difficulty: Medium (focus on understanding concepts, not rote memorization).
-4. Output Language: MUST be in casual, clear Indonesian (Bahasa Indonesia santai tapi jelas), regardless of the input language.
-
-### B. Answer Evaluator Prompt (Role: Feedback Engine)
-Triggered when evaluating open-ended/short-essay answers:
-
-You are GampangBot, a direct and helpful study assistant.
-Task: Evaluate the user's answer against the question and source material.
-Rules:
-- All output MUST be in casual Indonesian (Bahasa Indonesia).
-- Start the first sentence strictly with "BENAR!" or "KURANG TEPAT!".
-- Explain why in a maximum of 2 sentences.
-- Provide 1 quick memory trick or key takeaway so the user remembers it during the exam.
-
-### C. Explain The Subje t that user learning
-Triggered when user sending a text, image, or file. And user ask for explain that:
-
-You are GampangBot, a direft and helpful study assistant.
-Task: Explain the material that user sending, with **Explain Like Im 5** skill.
-Rules:
-- All output MUST be in casual Indonesian (Bahasa Indonesia).
-- First. Start with explain step-by-step, slowly, and clear.
-- Second. Then, Explain the Main or the Core, with detail. Buy still clearly and user can know that
-- Last. Write a summary of what did you explain before.q
-
-## 5. Agent Skills & Core Capabilities
-1. **Text Parsing & Chunking:** Process raw text messages from Telegram and truncate overly long inputs to stay within safe token limits.
-2. **Interactive Inline Keyboard Quiz:** Deliver multiple-choice options using Telegram Inline Keyboards (clickable A, B, C, D buttons) to eliminate user typing friction.
-3. **Session & State Tracking:** Maintain per-user quiz states in memory (`IDLE`, `QUIZ_ACTIVE`, `AWAITING_ANSWER`) keyed by Telegram `chatId`.
-4. **Graceful Error & Timeout Handling:** Wrap all LLM API calls and `JSON.parse()` executions in `try-catch` blocks with a strict 15-second timeout. If an API call fails, reply in Indonesian: "Server AI lagi sibuk nih, coba kirim ulang materi lu bentar lagi ya."
-
-## 6. Strict Development Guardrails (Do's & Don'ts)
-- **DO NOT** build custom authentication or login systems; use the native Telegram `user.id` / `chat.id` as the unique identifier.
-- **DO NOT** implement payment gateways, subscriptions, or billing logic during the validation phase.
-- **DO NOT** build a web-based frontend or admin dashboard; handle all operations strictly inside the Telegram chat interface.
-- **DO** strip any accidental Markdown fences before parsing LLM responses.
-- **DO** keep all user-facing bot messages, menus, and error alerts strictly in Indonesian.
-- **DO** keep the codebase inside a single, modular directory structure (`index.js`, `.env`, `package.json`) for rapid iteration and debugging.
+## 6. LLM Integration & Robustness Rules
+- **Client Configuration:**
+  - `maxRetries: 0` on the OpenAI client instance to eliminate invisible SDK retry explosions and enforce predictable failover deadlines.
+- **Dynamic Model Routing:**
+  - Light prompts (short text, non-STEM concepts, hints) -> primary: Mimo v2.6 (`mimo-v2.6-flash:free`), fallback: DeepSeek (`deepseek-v4.1-flash:free`).
+  - Heavy prompts (long text >500 chars, complex STEM / formulas / code) -> primary: DeepSeek (`deepseek-v4.1-flash:free`), fallback: Mimo v2.6 (`mimo-v2.6-flash:free`).
+- **Token Budgeting & Timeouts:**
+  - Quiz generation: `max_tokens: 450`, timeout `30s` (light) / `45s` (heavy).
+  - Explanations: `max_tokens: 750` (light, timeout `45s`) / `1000` (heavy, timeout `60s`).
+  - Hints: `max_tokens: 250`, timeout `30s`.
+- **JSON Parsing:** Always use `extractJson()` in `llm.js`. It strips fences, slices `{ ... }`, and automatically repairs trailing commas before parsing.
+- **Prompt Guard:** Keep the prompt rule prohibiting models from calculating/deriving math solutions; models must only output the JSON schema.
+- **Languages:** All user-facing bot messages, buttons, and error notices must remain in casual Indonesian (*Bahasa Indonesia santai*). Developer logs and internal docs remain in English.

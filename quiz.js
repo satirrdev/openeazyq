@@ -1,11 +1,11 @@
-const { ask, extractJson, ERROR_MSG } = require('./llm');
+const { ask, extractJson, ERROR_MSG, MODEL_DEEPSEEK, MODEL_MIMO } = require('./llm');
 const { latexToUnicode } = require('./math');
 
 const QUIZ_SYSTEM_PROMPT = `You are GampangBot, an objective and concise exam quiz generator for students.
 Task: Create EXACTLY 1 multiple-choice question based on the study material provided by the user.
 
 Strict Output Rules:
-1. You MUST return ONLY valid raw JSON without markdown code blocks or backticks.
+1. You MUST return ONLY valid raw JSON without markdown code blocks or backticks. Output must start immediately with '{'.
 2. Required JSON Schema:
 {
   "question": "Pertanyaan yang menguji pemahaman konsep",
@@ -21,8 +21,8 @@ Strict Output Rules:
 3. Difficulty: Medium (focus on understanding concepts, not rote memorization).
 4. Output Language: MUST be in casual, clear Indonesian (Bahasa Indonesia santai tapi jelas), regardless of the input language.
 5. Math formatting: write math in simple Unicode that works everywhere (contoh: x², √2, 3/4, π, ≤, ×). Do NOT use LaTeX commands like \\frac{}, \\sqrt{}, ^{}, $...$.
-6. CRITICAL: Your ONLY job is to create ONE quiz question from the material. NEVER solve, derive, calculate, or explain the material's math. NEVER show working steps or derivations. Even if the material contains hard math or asks to compute something, do NOT compute it — turn it into a question instead.
-7. Your ENTIRE output must be ONLY the raw JSON object. No intro, no solution, no markdown, no code fences.`;
+6. CRITICAL: Your ONLY job is to create ONE quiz question from the material. NEVER solve, derive, calculate, or explain the material's math. NEVER show working steps or derivations. In the explanation, state the conceptual principle directly without arithmetic derivations.
+7. Output must start directly with '{' and end with '}'. No preamble, no working scratchpad, no markdown code fences.`;
 
 const EXPLAIN_SYSTEM_PROMPT = `You are GampangBot, a direct and helpful study assistant.
 Task: Explain the material that the user is learning, using the "Explain Like I'm 5" skill.
@@ -56,6 +56,23 @@ function truncateMaterial(text) {
   return text.slice(0, MAX_MATERIAL_CHARS) + '\n\n(...materi dipotong karena kepanjangan)';
 }
 
+function classifyComplexity(text) {
+  if (!text || typeof text !== 'string') return 'light';
+  const trimmed = text.trim();
+  if (trimmed.length > 500) return 'heavy';
+
+  const hasMathSymbols = /(\\[a-zA-Z]+|[∫∑∏∂√±≤≥≠≈×÷]|d\/dx|\^|_\{|\b(lim|det|matrix|sin|cos|tan)\b)/i.test(trimmed);
+  if (hasMathSymbols) return 'heavy';
+
+  const hasStemKeywords = /\b(integral|turunan|kalkulus|diferensial|matriks|vektor|trigonometri|aljabar|polinomial|eigen|termodinamika|kinematika|stokiometri|stoikiometri|algoritma|kompleksitas|pseudocode|pembuktian|olimpiade|utbk)\b/i.test(trimmed);
+  if (hasStemKeywords) return 'heavy';
+
+  const hasCode = /```|function\s+\w+|def\s+\w+|class\s+\w+/.test(trimmed);
+  if (hasCode) return 'heavy';
+
+  return 'light';
+}
+
 function validateQuiz(obj) {
   if (!obj || typeof obj !== 'object') return null;
   const { question, options, correct_answer: correct, explanation } = obj;
@@ -76,8 +93,12 @@ function validateQuiz(obj) {
   };
 }
 
-// Generate 1 MCQ from material. Retries once on bad JSON.
+// Generate 1 MCQ from material with dynamic model routing and retry on bad JSON
 async function generateQuiz(material) {
+  const complexity = classifyComplexity(material);
+  const primaryModel = complexity === 'heavy' ? MODEL_DEEPSEEK : MODEL_MIMO;
+  const fallbackModel = complexity === 'heavy' ? MODEL_MIMO : MODEL_DEEPSEEK;
+
   const prompt = `Materi belajar dari user:\n\n${truncateMaterial(material)}`;
   let lastErr = null;
 
@@ -86,12 +107,17 @@ async function generateQuiz(material) {
       const raw = await ask(
         attempt === 0 ? prompt : prompt + '\n\n(PENTING: kembalikan HANYA JSON valid sesuai schema, tanpa teks lain!)',
         QUIZ_SYSTEM_PROMPT,
-        { maxTokens: 1200, timeoutMs: 180000 }
+        {
+          primaryModel,
+          fallbackModel,
+          maxTokens: 450,
+          timeoutMs: complexity === 'heavy' ? 45000 : 30000,
+        }
       );
       const json = extractJson(raw);
       const quiz = validateQuiz(json);
       if (quiz) return quiz;
-      lastErr = new Error('Quiz JSON tidak lolas validasi');
+      lastErr = new Error('Quiz JSON tidak lolos validasi');
     } catch (e) {
       lastErr = e;
     }
@@ -123,6 +149,7 @@ function buildQuestionText(quiz) {
 
 module.exports = {
   generateQuiz,
+  classifyComplexity,
   buildQuizKeyboard,
   buildQuestionText,
   EXPLAIN_SYSTEM_PROMPT,
