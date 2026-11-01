@@ -62,6 +62,7 @@ const {
   setState,
   downloadTelegramImageAsBase64,
   sendSmart,
+  splitIntoChunks,
 } = require('../bot');
 
 // Test framework state
@@ -1408,6 +1409,38 @@ function registerAllSuites() {
       await sendSmart(mockBot, chatId, '   \n  ');
       assert.strictEqual(sentMessages.length, 2);
       assert.strictEqual(sentMessages[1].text, ERROR_MSG);
+    });
+
+    test('7.8 splitIntoChunks breaks text > 4000 chars into smaller chunks at paragraph or newline boundaries', () => {
+      const p1 = 'Bagian awal paragraf pertama: ' + 'A'.repeat(2500);
+      const p2 = 'Bagian paragraf kedua: ' + 'B'.repeat(2500);
+      const longText = p1 + '\n\n' + p2;
+      assert.ok(longText.length > 4000);
+
+      const chunks = splitIntoChunks(longText, 4000);
+      assert.strictEqual(chunks.length, 2);
+      for (const chunk of chunks) {
+        assert.ok(chunk.length <= 4000, `Chunk length ${chunk.length} should be <= 4000`);
+      }
+      assert.ok(chunks[0].includes('Bagian awal paragraf pertama:'));
+      assert.ok(chunks[1].includes('Bagian paragraf kedua:'));
+    });
+
+    test('7.9 sendSmart sends multiple sequential messages when text exceeds 4000 chars and attaches markup to last chunk only', async () => {
+      const { mockBot, sentMessages } = createMockBot();
+      const chatId = 3007;
+
+      const longExplanation = 'Paragraf 1: ' + 'X'.repeat(3500) + '\n\nParagraf 2: ' + 'Y'.repeat(2500);
+      assert.ok(longExplanation.length > 4000);
+
+      const fakeMarkup = { inline_keyboard: [[{ text: 'Tombol', callback_data: 'TEST' }]] };
+      await sendSmart(mockBot, chatId, longExplanation, { reply_markup: fakeMarkup });
+
+      assert.strictEqual(sentMessages.length, 2, 'Must deliver 2 messages sequentially');
+      assert.strictEqual(sentMessages[0].opts.reply_markup, undefined, 'First chunk should not have reply_markup');
+      assert.deepStrictEqual(sentMessages[1].opts.reply_markup, fakeMarkup, 'Final chunk must have reply_markup');
+      assert.ok(sentMessages[0].text.length <= 4000);
+      assert.ok(sentMessages[1].text.length <= 4000);
     });
   });
 }

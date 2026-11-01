@@ -52,20 +52,60 @@ const CHOICE_KEYBOARD = {
   ],
 };
 
-// Send message with Unicode-converted math; try Markdown, else plain text
+function splitIntoChunks(text, maxLen = 4000) {
+  if (!text || text.length <= maxLen) return [text || ''];
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    let splitIdx = remaining.lastIndexOf('\n\n', maxLen);
+    if (splitIdx === -1 || splitIdx < maxLen * 0.4) {
+      splitIdx = remaining.lastIndexOf('\n', maxLen);
+    }
+    if (splitIdx === -1 || splitIdx < maxLen * 0.4) {
+      splitIdx = remaining.lastIndexOf('. ', maxLen);
+      if (splitIdx !== -1) splitIdx += 1;
+    }
+    if (splitIdx === -1 || splitIdx < maxLen * 0.4) {
+      splitIdx = remaining.lastIndexOf(' ', maxLen);
+    }
+    if (splitIdx === -1 || splitIdx < 1) {
+      splitIdx = maxLen;
+    }
+    chunks.push(remaining.slice(0, splitIdx).trim());
+    remaining = remaining.slice(splitIdx).trim();
+  }
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+  return chunks;
+}
+
+async function sendChunk(bot, chatId, text, opts = {}) {
+  try {
+    return await bot.sendMessage(chatId, text, { ...opts, parse_mode: 'Markdown' });
+  } catch (e) {
+    if (e.response && e.response.body && e.response.body.description &&
+        /parse/i.test(e.response.body.description)) {
+      return await bot.sendMessage(chatId, text.replace(/[*_`]/g, ''), opts);
+    }
+    throw e;
+  }
+}
+
+// Send message with Unicode-converted math; split chunks <= 4000 chars; try Markdown, else plain text
 async function sendSmart(bot, chatId, text, opts = {}) {
   const raw = typeof text === 'string' ? text : String(text || '');
   const clean = raw.trim();
   const safe = latexToUnicode(clean || ERROR_MSG);
-  try {
-    return await bot.sendMessage(chatId, safe, { ...opts, parse_mode: 'Markdown' });
-  } catch (e) {
-    if (e.response && e.response.body && e.response.body.description &&
-        /parse/i.test(e.response.body.description)) {
-      return await bot.sendMessage(chatId, safe.replace(/[*_`]/g, ''), opts);
-    }
-    throw e;
+  const chunks = splitIntoChunks(safe, 4000);
+
+  let lastSent = null;
+  for (let i = 0; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const chunkOpts = isLast ? opts : { ...opts, reply_markup: undefined };
+    lastSent = await sendChunk(bot, chatId, chunks[i], chunkOpts);
   }
+  return lastSent;
 }
 
 // Download Telegram photo or document file and convert to Base64 data URL
@@ -476,4 +516,5 @@ module.exports = {
   setState,
   downloadTelegramImageAsBase64,
   sendSmart,
+  splitIntoChunks,
 };

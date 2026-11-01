@@ -86,8 +86,8 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
     });
     const choice = completion.choices && completion.choices[0];
     const message = choice && choice.message;
-    const content = message ? (message.content || message.reasoning_content || '') : '';
-    if (!content || !content.trim()) {
+    const content = message && typeof message.content === 'string' ? message.content.trim() : '';
+    if (!content) {
       throw new Error(`Model ${modelName} returned empty response`);
     }
     return content;
