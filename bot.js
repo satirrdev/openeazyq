@@ -54,13 +54,15 @@ const CHOICE_KEYBOARD = {
 
 // Send message with Unicode-converted math; try Markdown, else plain text
 async function sendSmart(bot, chatId, text, opts = {}) {
-  const safe = latexToUnicode(typeof text === 'string' ? text : String(text));
+  const raw = typeof text === 'string' ? text : String(text || '');
+  const clean = raw.trim();
+  const safe = latexToUnicode(clean || ERROR_MSG);
   try {
     return await bot.sendMessage(chatId, safe, { ...opts, parse_mode: 'Markdown' });
   } catch (e) {
     if (e.response && e.response.body && e.response.body.description &&
         /parse/i.test(e.response.body.description)) {
-      return bot.sendMessage(chatId, safe.replace(/[*_`]/g, ''), opts);
+      return await bot.sendMessage(chatId, safe.replace(/[*_`]/g, ''), opts);
     }
     throw e;
   }
@@ -364,7 +366,7 @@ function register(bot) {
           });
         } catch (e) { /* best effort */ }
 
-        sendSmart(
+        await sendSmart(
           bot,
           chatId,
           `${header}\nJawaban lu: *${answer}. ${quiz.options[answer]}*${correctNote}\n\n` +
@@ -402,10 +404,10 @@ function register(bot) {
         maxTokens: 250,
         timeoutMs: 30000,
       });
-      sendSmart(bot, chatId, cleanMarkdown(reply));
+      await sendSmart(bot, chatId, cleanMarkdown(reply));
     } catch (e) {
       console.error('Hint error:', e);
-      sendSmart(bot, chatId, 'Nope, soalnya udah dikunci 🔒 Fokus jawab yang ada ya, lu pasti bisa! 💪');
+      await sendSmart(bot, chatId, 'Nope, soalnya udah dikunci 🔒 Fokus jawab yang ada ya, lu pasti bisa! 💪');
     } finally {
       clearInterval(typing);
     }
@@ -431,7 +433,7 @@ function register(bot) {
     } catch (e) {
       console.error('Quiz generation error:', e);
       setState(chatId, { state: 'IDLE', quiz: null, imageBase64: null });
-      bot.sendMessage(chatId, AI_BUSY_MSG);
+      bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
     }
   }
 
@@ -458,12 +460,12 @@ function register(bot) {
         EXPLAIN_SYSTEM_PROMPT,
         { primaryModel, fallbackModel, maxTokens, timeoutMs, imageBase64 }
       );
-      sendSmart(bot, chatId, cleanMarkdown(explanation));
+      await sendSmart(bot, chatId, cleanMarkdown(explanation));
       setState(chatId, { state: 'IDLE', imageBase64: null });
     } catch (e) {
       console.error('Explain error:', e);
       setState(chatId, { state: 'IDLE', imageBase64: null });
-      bot.sendMessage(chatId, AI_BUSY_MSG);
+      bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
     }
   }
 }
@@ -473,4 +475,5 @@ module.exports = {
   getState,
   setState,
   downloadTelegramImageAsBase64,
+  sendSmart,
 };

@@ -40,6 +40,7 @@ const {
   ask,
   extractJson,
   stripFences,
+  ERROR_MSG,
   MODEL_DEEPSEEK,
   MODEL_MIMO,
   PRIMARY_MODEL,
@@ -60,6 +61,7 @@ const {
   getState,
   setState,
   downloadTelegramImageAsBase64,
+  sendSmart,
 } = require('../bot');
 
 // Test framework state
@@ -881,6 +883,30 @@ function registerAllSuites() {
       assert.strictEqual(calls.length, 1, 'Should not call text-only fallback when imageBase64 is provided');
       assert.strictEqual(calls[0], MODEL_DEEPSEEK);
     });
+
+    test('4.9 Empty response handling: model returning empty content or whitespace triggers failover or throws', async () => {
+      const calls = [];
+      const originalWarn = console.warn;
+      console.warn = () => {};
+
+      try {
+        mockHandler = async (body) => {
+          calls.push(body.model);
+          if (body.model === MODEL_DEEPSEEK) {
+            return { choices: [{ message: { content: '   ' } }] };
+          }
+          return { choices: [{ message: { content: 'Recovered from empty primary' } }] };
+        };
+
+        const result = await ask('Tes empty output', 'Sys');
+        assert.strictEqual(result, 'Recovered from empty primary');
+        assert.strictEqual(calls.length, 2);
+        assert.strictEqual(calls[0], MODEL_DEEPSEEK);
+        assert.strictEqual(calls[1], MODEL_MIMO);
+      } finally {
+        console.warn = originalWarn;
+      }
+    });
   });
 
   // ----------------------------------------------------
@@ -1308,7 +1334,7 @@ function registerAllSuites() {
 
     test('7.5 In-memory imageBase64 is cleared after handleQuiz completes', async () => {
       const { handlers } = createMockBot();
-      const chatId = 3004;
+      const chatId = 390000 + Math.floor(Math.random() * 10000);
 
       mockHandler = async () => ({
         choices: [
@@ -1369,6 +1395,19 @@ function registerAllSuites() {
       const s = getState(chatId);
       assert.strictEqual(s.state, 'IDLE');
       assert.strictEqual(s.imageBase64, null, 'imageBase64 must be nullified to prevent memory leaks');
+    });
+
+    test('7.7 sendSmart replaces empty or whitespace text with ERROR_MSG to prevent Telegram 400 Bad Request', async () => {
+      const { mockBot, sentMessages } = createMockBot();
+      const chatId = 3006;
+
+      await sendSmart(mockBot, chatId, '');
+      assert.strictEqual(sentMessages.length, 1);
+      assert.strictEqual(sentMessages[0].text, ERROR_MSG);
+
+      await sendSmart(mockBot, chatId, '   \n  ');
+      assert.strictEqual(sentMessages.length, 2);
+      assert.strictEqual(sentMessages[1].text, ERROR_MSG);
     });
   });
 }

@@ -18,4 +18,16 @@ bot.on('polling_error', (err) => {
   console.error('Polling error:', err.message);
 });
 
+bot.on('error', (err) => {
+  console.error('Bot error event:', err.message);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception thrown:', err);
+});
+
 console.log('🤖 GampangBot jalan nih! Legs polling aktif. Gaskeun!');

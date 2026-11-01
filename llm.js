@@ -84,7 +84,13 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
       signal: controller.signal,
       timeout: timeoutMs,
     });
-    return completion.choices[0].message.content || '';
+    const choice = completion.choices && completion.choices[0];
+    const message = choice && choice.message;
+    const content = message ? (message.content || message.reasoning_content || '') : '';
+    if (!content || !content.trim()) {
+      throw new Error(`Model ${modelName} returned empty response`);
+    }
+    return content;
   } finally {
     clearTimeout(timer);
   }
