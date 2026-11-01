@@ -78,10 +78,11 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 - **Quota Accounting:** Quota is only decremented (`recordQuizUsage`) after quiz generation and message delivery succeed.
 - **Persistence:** In-memory store atomically persists to `data/users.json` via temporary write (`data/users.json.tmp`) and `fs.renameSync`.
 - **User & Admin Commands:**
+  - `/quiz [materi]`: Generates a multiple-choice quiz directly. Supports `/quiz <materi>` or `/quiz` without arguments (uses pre-existing material, uploaded image, or conversation history; prompts if empty).
   - `/ceklimit`: Displays user quota status (remaining/total for free users, or active premium status with Jakarta expiry date).
   - `/iduser`: Sends caller's Telegram user ID (`msg.from.id`) to provide to the owner for manual upgrade.
   - `/upgrade <userId> <days>`: Restricted to `ADMIN_ID`. Extends active premium or starts fresh from `Date.now()`. Notifies the target user upon success.
-  - `setMyCommands`: Registers Telegram menu shortcuts (`start`, `reset`, `ceklimit`, `iduser`) upon startup with graceful error handling.
+  - `setMyCommands`: Registers Telegram menu shortcuts (`start`, `quiz`, `reset`, `ceklimit`, `iduser`) upon startup with graceful error handling.
 
 ## 9. Conversation Memory & Context Window
 - **Sliding Window:** In-memory `history` array inside `getState(chatId)` retains up to 8 messages (4 user-assistant turns).

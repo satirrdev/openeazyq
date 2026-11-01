@@ -160,6 +160,7 @@ async function downloadTelegramImageAsBase64(bot, fileId, defaultMime = 'image/j
 function register(bot) {
   const BOT_COMMANDS = [
     { command: 'start', description: 'Mulai bot & panduan belajar' },
+    { command: 'quiz', description: 'Buat kuis pilihan ganda dari materi' },
     { command: 'reset', description: 'Reset ingatan percakapan & materi' },
     { command: 'ceklimit', description: 'Cek sisa limit kuis harian' },
     { command: 'iduser', description: 'Lihat ID Telegram untuk upgrade' },
@@ -169,6 +170,74 @@ function register(bot) {
       console.error('Failed to set Telegram commands menu:', err.message);
     });
   }
+
+  bot.onText(/^\/quiz(?:@\w+)?(?:\s+([\s\S]*))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from ? msg.from.id : chatId;
+    const s = getState(chatId);
+
+    // Concurrency check
+    if (s.state === 'QUIZ_ACTIVE' || s.state === 'EXPLAIN_ACTIVE') {
+      bot.sendMessage(chatId, 'Sabar ya, lagi diproses nih... ⏳');
+      return;
+    }
+
+    // Locked quiz in progress check
+    if (s.state === 'AWAITING_ANSWER' && s.quiz) {
+      bot.sendMessage(chatId, 'Nope, soalnya udah dikunci 🔒 Selesaikan dulu kuis yang lagi aktif ya!');
+      return;
+    }
+
+    // Quota check
+    if (!canTakeQuiz(userId)) {
+      bot.sendMessage(
+        chatId,
+        'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+      );
+      return;
+    }
+
+    const rawArgs = match && match[1] ? match[1].trim() : '';
+
+    // Direct material provided in command argument
+    if (rawArgs) {
+      if (rawArgs.length > 400) {
+        clearHistory(chatId);
+      }
+      setState(chatId, {
+        material: rawArgs,
+        imageBase64: null,
+      });
+      await handleQuiz(chatId);
+      return;
+    }
+
+    // Use pre-existing material or image
+    if (s.material || s.imageBase64) {
+      await handleQuiz(chatId);
+      return;
+    }
+
+    // Fallback to conversation history if available
+    if (s.history && s.history.length > 0) {
+      const historyMaterial = s.history
+        .map((h) => `${h.role === 'user' ? 'Topik' : 'Penjelasan'}: ${h.content}`)
+        .join('\n\n');
+      setState(chatId, {
+        material: historyMaterial,
+        imageBase64: null,
+      });
+      await handleQuiz(chatId);
+      return;
+    }
+
+    // No material available
+    await sendSmart(
+      bot,
+      chatId,
+      'Materinya belum ada nih! 📚\nKirim catatan atau materi kamu dulu, atau langsung ketik:\n`/quiz <materi kamu>`'
+    );
+  });
 
   bot.onText(/\/reset/, (msg) => {
     const chatId = msg.chat.id;
@@ -434,16 +503,13 @@ function register(bot) {
 
         setState(chatId, { choice: data });
 
-        // Show typing while the AI works
-        const typing = setInterval(() => {
-          bot.sendChatAction(chatId, 'typing').catch(() => {});
-        }, 4000);
-        const stopTyping = () => clearInterval(typing);
-
         if (data === 'CHOICE_QUIZ') {
-          handleQuiz(chatId).finally(stopTyping);
+          handleQuiz(chatId);
         } else {
-          handleExplain(chatId, material, imageBase64).finally(stopTyping);
+          const typing = setInterval(() => {
+            bot.sendChatAction(chatId, 'typing').catch(() => {});
+          }, 4000);
+          handleExplain(chatId, material, imageBase64).finally(() => clearInterval(typing));
         }
         return;
       }
@@ -557,6 +623,7 @@ function register(bot) {
     const s = getState(chatId);
     setState(chatId, { state: 'QUIZ_ACTIVE' });
     bot.sendMessage(chatId, 'Oke, lagi gw bikinin soal nih... ⏳');
+    const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
     try {
       const quiz = await generateQuiz(s.material, s.imageBase64);
@@ -574,6 +641,8 @@ function register(bot) {
       console.error('Quiz generation error:', e);
       setState(chatId, { state: 'IDLE', quiz: null, imageBase64: null });
       bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
+    } finally {
+      clearInterval(typing);
     }
   }
 

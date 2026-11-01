@@ -1084,13 +1084,14 @@ function registerAllSuites() {
       assert.strictEqual(quotaPrem.remaining, Infinity);
     });
 
-    test('7.2 bot.setMyCommands is called on register(bot) with start, reset, ceklimit, and iduser', () => {
+    test('7.2 bot.setMyCommands is called on register(bot) with start, quiz, reset, ceklimit, and iduser', () => {
       const { commandsCalls } = createMockBot();
       assert.strictEqual(commandsCalls.length, 1);
       assert.deepStrictEqual(
         commandsCalls[0],
         [
           { command: 'start', description: 'Mulai bot & panduan belajar' },
+          { command: 'quiz', description: 'Buat kuis pilihan ganda dari materi' },
           { command: 'reset', description: 'Reset ingatan percakapan & materi' },
           { command: 'ceklimit', description: 'Cek sisa limit kuis harian' },
           { command: 'iduser', description: 'Lihat ID Telegram untuk upgrade' },
@@ -1192,6 +1193,239 @@ function registerAllSuites() {
         `Expected premium status label, got: ${msg.text}`
       );
       assert.ok(msg.text.includes('WIB'), `Expected WIB timezone indicator, got: ${msg.text}`);
+    });
+  });
+
+  // ----------------------------------------------------
+  // SUITE 8: bot.js: /quiz Command Workflow, State Guardrails & Fallbacks
+  // ----------------------------------------------------
+  suite('Suite 8: bot.js: /quiz Command Workflow, State Guardrails & Fallbacks', () => {
+    const EXACT_QUOTA_EXHAUSTED_MSG =
+      'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx';
+
+    test('8.1 /quiz concurrency lock blocks execution during QUIZ_ACTIVE or EXPLAIN_ACTIVE', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8001;
+
+      setState(chatId, { state: 'QUIZ_ACTIVE' });
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      assert.strictEqual(sentMessages[0].text, 'Sabar ya, lagi diproses nih... ⏳');
+
+      sentMessages.length = 0;
+      setState(chatId, { state: 'EXPLAIN_ACTIVE' });
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz materi fisika',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      assert.strictEqual(sentMessages[0].text, 'Sabar ya, lagi diproses nih... ⏳');
+    });
+
+    test('8.2 /quiz locked state blocks execution during AWAITING_ANSWER', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8002;
+
+      setState(chatId, {
+        state: 'AWAITING_ANSWER',
+        quiz: {
+          question: 'Soal aktif',
+          options: { A: '1', B: '2', C: '3', D: '4' },
+          correct_answer: 'A',
+          explanation: 'Penjelasan',
+        },
+      });
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz materi baru',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      assert.strictEqual(
+        sentMessages[0].text,
+        'Nope, soalnya udah dikunci 🔒 Selesaikan dulu kuis yang lagi aktif ya!'
+      );
+      assert.strictEqual(getState(chatId).state, 'AWAITING_ANSWER');
+    });
+
+    test('8.3 /quiz quota gating blocks exhausted free user with exact upsell text', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8003;
+
+      for (let i = 0; i < 5; i++) {
+        store.recordQuizUsage(chatId);
+      }
+      assert.strictEqual(store.canTakeQuiz(chatId), false);
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz Hukum Newton',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes(EXACT_QUOTA_EXHAUSTED_MSG));
+      assert.strictEqual(store.getUser(chatId).quizCount, 5, 'Quota must not be incremented');
+    });
+
+    test('8.4 /quiz <materi> sets material, clears history if length > 400, and generates quiz', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8004;
+
+      botModule.appendHistory(chatId, 'user', 'Obrolan lama');
+      botModule.appendHistory(chatId, 'assistant', 'Jawaban lama');
+      assert.strictEqual(getState(chatId).history.length, 2);
+
+      const longMaterial = 'Materi biologi tentang sel tumbuhan dan dinding sel. '.repeat(15);
+      assert.ok(longMaterial.length > 400);
+
+      mockCompletionHandler = async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                question: 'Apa fungsi dinding sel tumbuhan?',
+                options: { A: 'Proteksi', B: 'Respirasi', C: 'Fotosintesis', D: 'Ekskresi' },
+                correct_answer: 'A',
+                explanation: 'Dinding sel memberi proteksi dan bentuk.',
+              }),
+            },
+          },
+        ],
+      });
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: `/quiz ${longMaterial}`,
+      });
+
+      await waitForState(chatId, (s) => s.state === 'AWAITING_ANSWER');
+
+      assert.strictEqual(getState(chatId).history.length, 0, 'History should be cleared when material > 400');
+      assert.strictEqual(getState(chatId).material, longMaterial.trim());
+      assert.strictEqual(store.getUser(chatId).quizCount, 1, 'Quota should increment after delivery');
+      assert.ok(sentMessages.some((m) => m.text.includes('Apa fungsi dinding sel tumbuhan?')));
+    });
+
+    test('8.5 /quiz without argument uses pre-existing material in state', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8005;
+
+      setState(chatId, { state: 'IDLE', material: 'Materi Kimia Larutan Asam Basa' });
+
+      mockCompletionHandler = async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                question: 'Berapa pH larutan netral?',
+                options: { A: '7', B: '1', C: '14', D: '0' },
+                correct_answer: 'A',
+                explanation: 'pH netral bernilai 7.',
+              }),
+            },
+          },
+        ],
+      });
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz',
+      });
+
+      await waitForState(chatId, (s) => s.state === 'AWAITING_ANSWER');
+
+      assert.ok(sentMessages.some((m) => m.text.includes('Berapa pH larutan netral?')));
+      assert.strictEqual(store.getUser(chatId).quizCount, 1);
+    });
+
+    test('8.6 /quiz without argument synthesizes material from history when s.material is empty', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8006;
+
+      setState(chatId, { state: 'IDLE', material: '' });
+      botModule.appendHistory(chatId, 'user', 'Jelasin kenapa langit biru');
+      botModule.appendHistory(chatId, 'assistant', 'Karena hamburan Rayleigh cahaya matahari oleh partikel atmosfer');
+
+      mockCompletionHandler = async (body) => {
+        const userPrompt = body.messages.find((m) => m.role === 'user').content;
+        assert.ok(userPrompt.includes('hamburan Rayleigh'), 'Prompt should contain synthesized history');
+        return {
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  question: 'Fenomena apa yang menyebabkan langit berwarna biru?',
+                  options: { A: 'Hamburan Rayleigh', B: 'Difraksi', C: 'Polarisasi', D: 'Interferensi' },
+                  correct_answer: 'A',
+                  explanation: 'Hamburan Rayleigh menyebarkan gelombang pendek lebih banyak.',
+                }),
+              },
+            },
+          ],
+        };
+      };
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz',
+      });
+
+      await waitForState(chatId, (s) => s.state === 'AWAITING_ANSWER');
+
+      assert.ok(sentMessages.some((m) => m.text.includes('Fenomena apa yang menyebabkan langit berwarna biru?')));
+    });
+
+    test('8.7 /quiz without argument, material, image, or history delivers empty material prompt', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8007;
+
+      setState(chatId, { state: 'IDLE', material: '', imageBase64: null, history: [] });
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes('Materinya belum ada nih! 📚'));
+      assert.ok(sentMessages[0].text.includes('/quiz <materi kamu>'));
+      assert.strictEqual(store.getUser(chatId).quizCount, 0);
+    });
+
+    test('8.8 /quiz regex does not falsely match /quizlet and handles trailing whitespace safely', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 8008;
+
+      setState(chatId, { state: 'IDLE', material: '', imageBase64: null, history: [] });
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quizlet materi biologi',
+      });
+      assert.strictEqual(sentMessages.length, 0, '/quizlet should not match /quiz command');
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: '/quiz   ',
+      });
+      assert.strictEqual(sentMessages.length, 1, 'Trailing whitespace should fall back to empty material prompt');
+      assert.ok(sentMessages[0].text.includes('Materinya belum ada nih! 📚'));
     });
   });
 }
