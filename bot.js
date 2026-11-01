@@ -1,5 +1,6 @@
 const { ask, extractJson, MODEL_DEEPSEEK, MODEL_MIMO } = require('./llm');
 const { latexToUnicode } = require('./math');
+const { canTakeQuiz, recordQuizUsage, upgradeUser } = require('./store');
 const {
   EXPLAIN_SYSTEM_PROMPT,
   HINT_SYSTEM_PROMPT,
@@ -81,6 +82,55 @@ function register(bot) {
     );
   });
 
+  bot.onText(/\/iduser/, (msg) => {
+    bot.sendMessage(
+      msg.chat.id,
+      `ID Telegram kamu: \`${msg.from.id}\`\nKirim ID ini ke owner @satirvx buat upgrade kuis.`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  bot.onText(/\/upgrade(?:\s+(.+))?/, async (msg, match) => {
+    const adminId = process.env.ADMIN_ID;
+    if (!adminId || String(msg.from.id) !== String(adminId)) {
+      bot.sendMessage(msg.chat.id, 'Akses ditolak. Perintah ini cuma buat admin.');
+      return;
+    }
+
+    const rawArgs = (match && match[1] ? match[1].trim() : '').split(/\s+/);
+    const targetUserId = rawArgs[0];
+    const days = parseInt(rawArgs[1], 10);
+
+    if (!targetUserId || isNaN(days) || days <= 0) {
+      bot.sendMessage(
+        msg.chat.id,
+        'Format salah! Gunakan: `/upgrade <userId> <days>`\nContoh: `/upgrade 123456789 7`',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    const user = upgradeUser(targetUserId, days);
+    const expiryDate = new Date(user.premiumUntil).toLocaleString('id-ID', {
+      timeZone: 'Asia/Jakarta',
+    });
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `✅ Berhasil upgrade user \`${targetUserId}\` selama ${days} hari.\nKadaluarsa: ${expiryDate} WIB`,
+      { parse_mode: 'Markdown' }
+    );
+
+    try {
+      await bot.sendMessage(
+        targetUserId,
+        `🎉 Akun kamu sudah di-upgrade ke Premium selama ${days} hari! Sekarang kamu bisa bikin kuis tanpa batas harian. Makasih udah support @satirvx! 🚀`
+      );
+    } catch (err) {
+      bot.sendMessage(msg.chat.id, `⚠️ Gagal kirim notifikasi ke user: ${err.message}`);
+    }
+  });
+
   bot.on('message', (msg) => {
     // Ignore commands (/start etc.) and photo/media pairs without text
     if (!msg.text || msg.text.startsWith('/')) return;
@@ -127,6 +177,20 @@ function register(bot) {
           await bot.answerCallbackQuery(query.id, { text: 'Sabar ya, lagi diproses nih... ⏳' });
           return;
         }
+
+        if (data === 'CHOICE_QUIZ' && !canTakeQuiz(chatId)) {
+          await bot.answerCallbackQuery(query.id);
+          await bot.editMessageReplyMarkup(undefined, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+          }).catch(() => {});
+          bot.sendMessage(
+            chatId,
+            'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+          );
+          return;
+        }
+
         await bot.answerCallbackQuery(query.id);
         const material = s.material;
         if (!material) {
@@ -243,6 +307,7 @@ function register(bot) {
       const sent = await sendSmart(bot, chatId, buildQuestionText(quiz), {
         reply_markup: buildQuizKeyboard(),
       });
+      recordQuizUsage(chatId);
       setState(chatId, { state: 'AWAITING_ANSWER', quiz, messageId: sent.message_id });
     } catch (e) {
       console.error('Quiz generation error:', e);

@@ -7,7 +7,7 @@ Compact operational guide for AI agents working in this repository.
 - **Run the bot:** `node index.js` (or `npm start`).
 - **Syntax validation (fast verification):**
   ```bash
-  node -c index.js bot.js llm.js quiz.js math.js
+  node -c index.js bot.js llm.js quiz.js math.js store.js
   ```
 - **Single test / test script:** No formal test runner (Jest/Mocha) is installed. Run targeted verification scripts directly: `node <script_path>.js`.
 
@@ -18,6 +18,7 @@ bot.js    --> Bot event wiring (message, callback_query), in-memory chat state m
 llm.js    --> OpenAI client instance, ask() with primary-to-fallback failover, extractJson() auto-repair.
 quiz.js   --> System prompts (quiz, explain, hint), quiz generator with JSON validation/retry, keyboard builders.
 math.js   --> latexToUnicode() regex pipeline converting LaTeX syntax into clean Unicode for Telegram.
+store.js  --> Quota tracking & premium store, atomic persistence to data/users.json.
 ```
 
 ## 3. Environment Variables (.env)
@@ -27,6 +28,7 @@ Required keys in `.env` (never commit `.env`):
 - `AI_API_KEY`: API key for the AI provider.
 - `AI_MODEL_NAME`: Primary model ID (defaults to `deepseek-v4.1-flash:free` if unset).
 - `AI_FALLBACK_MODEL_NAME`: Automatic failover model (defaults to `mimo-v2.6-flash:free`).
+- `ADMIN_ID`: Telegram user ID of admin authorized to run `/upgrade`.
 - `PORT`: Optional port (defaults to 3000).
 
 ## 4. State Machine & Concurrency Guardrails
@@ -57,3 +59,16 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 - **JSON Parsing:** Always use `extractJson()` in `llm.js`. It strips fences, slices `{ ... }`, and automatically repairs trailing commas before parsing.
 - **Prompt Guard:** Keep the prompt rule prohibiting models from calculating/deriving math solutions; models must only output the JSON schema.
 - **Languages:** All user-facing bot messages, buttons, and error notices must remain in casual Indonesian (*Bahasa Indonesia santai*). Developer logs and internal docs remain in English.
+
+## 7. Quiz Quota & Premium Tier (`store.js`)
+- **Daily Quota:** Free users are limited to 5 quizzes per day.
+- **Timezone & Reset:** Asia/Jakarta (00:00 WIB reset). Uses lazy reset comparing `user.lastQuizDate` with `YYYY-MM-DD` from `Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta' })`.
+- **Unlimited Features:**
+  - Active premium users (`user.premiumUntil > Date.now()`) have unlimited quiz attempts.
+  - Material explanation (`CHOICE_EXPLAIN`) is always unlimited for everyone.
+- **Quota Accounting:** Quota is only decremented (`recordQuizUsage`) after quiz generation and message delivery succeed.
+- **Persistence:** In-memory store atomically persists to `data/users.json` via temporary write (`data/users.json.tmp`) and `fs.renameSync`.
+- **User & Admin Commands:**
+  - `/iduser`: Sends caller's Telegram user ID (`msg.from.id`) to provide to the owner for manual upgrade.
+  - `/upgrade <userId> <days>`: Restricted to `ADMIN_ID`. Extends active premium or starts fresh from `Date.now()`. Notifies the target user upon success.
+
