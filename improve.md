@@ -98,7 +98,7 @@ To serve Satir effectively, the following operational rules are permanently esta
    - When inference appears slow or times out, never guess that network or compute alone is at fault without verifying model prompt adherence. Inspect whether the model drifted into solving the problem or writing long derivations.
 
 3. **Task-Specific Token Budgeting:**
-   - Single-question quiz generation must remain strictly capped at 800–1200 max tokens to prevent runaway output.
+   - Single-question quiz generation must remain strictly capped at 800-1200 max tokens to prevent runaway output.
    - Conceptual explanations can use up to 2500 max tokens.
    - Hints must remain capped at 400 max tokens.
 

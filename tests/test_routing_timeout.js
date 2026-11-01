@@ -19,6 +19,8 @@
  * 5. extractJson resilience in llm.js:
  *    - Handles trailing commas, markdown fences (with/without lang tag), leading text, trailing text
  * 6. End-to-End Quiz Generation Fallback & Robustness
+ * 7. Telegram Multimodal Image Handling in bot.js
+ * 8. Conversation Memory, Sliding Window, Reset Triggers & Follow-up Routing
  */
 
 // Ensure environment variables are present before requiring dependencies
@@ -60,6 +62,8 @@ const {
   register: registerBot,
   getState,
   setState,
+  appendHistory,
+  clearHistory,
   downloadTelegramImageAsBase64,
   sendSmart,
   splitIntoChunks,
@@ -95,10 +99,13 @@ function createMockBot() {
   const sentMessages = [];
   const answeredCallbacks = [];
   const editedMarkups = [];
+  const registeredCommands = [];
+  const textHandlers = [];
 
   const mockBot = {
     onText: (pattern, cb) => {
       handlers['onText_' + pattern] = cb;
+      textHandlers.push({ pattern, cb });
     },
     on: (event, cb) => {
       handlers[event] = cb;
@@ -118,12 +125,29 @@ function createMockBot() {
       return true;
     },
     getFileLink: async (fileId) => `https://api.telegram.org/file/bot-mock/${fileId}`,
-    setMyCommands: async () => true,
+    setMyCommands: async (commands) => {
+      registeredCommands.push(commands);
+      return true;
+    },
   };
 
   registerBot(mockBot);
 
-  return { mockBot, handlers, sentMessages, answeredCallbacks, editedMarkups };
+  const dispatch = async (msg) => {
+    if (msg.text) {
+      for (const th of textHandlers) {
+        const match = msg.text.match(th.pattern);
+        if (match) {
+          await th.cb(msg, match);
+        }
+      }
+    }
+    if (handlers.message) {
+      await handlers.message(msg);
+    }
+  };
+
+  return { mockBot, handlers, sentMessages, answeredCallbacks, editedMarkups, registeredCommands, textHandlers, dispatch };
 }
 
 // ==========================================
@@ -360,7 +384,7 @@ function registerAllSuites() {
   // ----------------------------------------------------
   suite('3. Dynamic Model Routing in quiz.js and bot.js', () => {
     // 3.1 Light material in quiz.js routes to DeepSeek
-    test('3.1 quiz.js: Light material routes to DeepSeek (primary) with 30s timeout & 450 tokens', async () => {
+    test('3.1 quiz.js: Light material routes to DeepSeek (primary) with 30s timeout & 800 tokens', async () => {
       let capturedBody = null;
       let capturedOpts = null;
 
@@ -389,11 +413,11 @@ function registerAllSuites() {
       assert.ok(quiz);
       assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, `Primary model for light question must be DeepSeek (${MODEL_DEEPSEEK})`);
       assert.strictEqual(capturedOpts.timeout, 30000, 'Light question timeout must be 30,000ms');
-      assert.strictEqual(capturedBody.max_tokens, 450, 'Max tokens must be 450 for quiz generation');
+      assert.strictEqual(capturedBody.max_tokens, 800, 'Max tokens must be 800 for quiz generation');
     });
 
     // 3.2 Heavy material in quiz.js routes to DeepSeek
-    test('3.2 quiz.js: Heavy material (math / STEM) routes to DeepSeek (primary) with 45s timeout & 450 tokens', async () => {
+    test('3.2 quiz.js: Heavy material (math / STEM) routes to DeepSeek (primary) with 45s timeout & 800 tokens', async () => {
       let capturedBody = null;
       let capturedOpts = null;
 
@@ -422,7 +446,7 @@ function registerAllSuites() {
       assert.ok(quiz);
       assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, `Primary model for heavy question must be DeepSeek (${MODEL_DEEPSEEK})`);
       assert.strictEqual(capturedOpts.timeout, 45000, 'Heavy question timeout must be 45,000ms');
-      assert.strictEqual(capturedBody.max_tokens, 450, 'Max tokens must be 450 for quiz generation');
+      assert.strictEqual(capturedBody.max_tokens, 800, 'Max tokens must be 800 for quiz generation');
     });
 
     // 3.3 Heavy material by length in quiz.js
@@ -453,8 +477,8 @@ function registerAllSuites() {
       assert.strictEqual(capturedModel, MODEL_DEEPSEEK, 'Material > 500 characters must route to DeepSeek as primary');
     });
 
-    // 3.4 bot.js: handleExplain with light material routes to DeepSeek, 750 tokens, 45s timeout
-    test('3.4 bot.js: handleExplain with light material routes to DeepSeek (primary) with 750 tokens & 45s timeout', async () => {
+    // 3.4 bot.js: handleExplain with light material routes to DeepSeek, 2500 tokens, 75s timeout
+    test('3.4 bot.js: handleExplain with light material routes to DeepSeek (primary) with 2500 tokens & 75s timeout', async () => {
       const { handlers } = createMockBot();
       const chatId = 2001;
 
@@ -490,12 +514,12 @@ function registerAllSuites() {
 
       assert.ok(capturedBody, 'LLM call should have been triggered');
       assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Light explanation must use DeepSeek as primary');
-      assert.strictEqual(capturedBody.max_tokens, 750, 'Light explanation max_tokens must be 750');
-      assert.strictEqual(capturedOpts.timeout, 45000, 'Light explanation timeout must be 45,000ms');
+      assert.strictEqual(capturedBody.max_tokens, 2500, 'Light explanation max_tokens must be 2500');
+      assert.strictEqual(capturedOpts.timeout, 75000, 'Light explanation timeout must be 75,000ms');
     });
 
-    // 3.5 bot.js: handleExplain with heavy material routes to DeepSeek, 1000 tokens, 60s timeout
-    test('3.5 bot.js: handleExplain with heavy material routes to DeepSeek (primary) with 1000 tokens & 60s timeout', async () => {
+    // 3.5 bot.js: handleExplain with heavy material routes to DeepSeek, 3200 tokens, 90s timeout
+    test('3.5 bot.js: handleExplain with heavy material routes to DeepSeek (primary) with 3200 tokens & 90s timeout', async () => {
       const { handlers } = createMockBot();
       const chatId = 2002;
 
@@ -531,12 +555,12 @@ function registerAllSuites() {
 
       assert.ok(capturedBody, 'LLM call should have been triggered');
       assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Heavy explanation must use DeepSeek as primary');
-      assert.strictEqual(capturedBody.max_tokens, 1000, 'Heavy explanation max_tokens must be 1000');
-      assert.strictEqual(capturedOpts.timeout, 60000, 'Heavy explanation timeout must be 60,000ms');
+      assert.strictEqual(capturedBody.max_tokens, 3200, 'Heavy explanation max_tokens must be 3200');
+      assert.strictEqual(capturedOpts.timeout, 90000, 'Heavy explanation timeout must be 90,000ms');
     });
 
-    // 3.6 bot.js: handleHint routes to DeepSeek, 250 tokens, 30s timeout
-    test('3.6 bot.js: handleHint routes to DeepSeek (primary) with 250 tokens & 30s timeout', async () => {
+    // 3.6 bot.js: handleHint routes to DeepSeek, 400 tokens, 30s timeout
+    test('3.6 bot.js: handleHint routes to DeepSeek (primary) with 400 tokens & 30s timeout', async () => {
       const { handlers } = createMockBot();
       const chatId = 2003;
 
@@ -577,7 +601,7 @@ function registerAllSuites() {
 
       assert.ok(capturedBody, 'Hint LLM call should have been triggered');
       assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Hint must use DeepSeek as primary');
-      assert.strictEqual(capturedBody.max_tokens, 250, 'Hint max_tokens must be 250');
+      assert.strictEqual(capturedBody.max_tokens, 400, 'Hint max_tokens must be 400');
       assert.strictEqual(capturedOpts.timeout, 30000, 'Hint timeout must be 30,000ms');
     });
 
@@ -611,7 +635,7 @@ function registerAllSuites() {
       assert.ok(quiz);
       assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Multimodal quiz must use DeepSeek as primary');
       assert.strictEqual(capturedOpts.timeout, 45000, 'Multimodal quiz timeout must be 45,000ms');
-      assert.strictEqual(capturedBody.max_tokens, 450, 'Max tokens must be 450');
+      assert.strictEqual(capturedBody.max_tokens, 800, 'Max tokens must be 800');
 
       const userMsg = capturedBody.messages.find((m) => m.role === 'user');
       assert.ok(Array.isArray(userMsg.content), 'User message content must be an array for multimodal input');
@@ -622,7 +646,7 @@ function registerAllSuites() {
     });
 
     // 3.8 bot.js: Multimodal handleExplain with imageBase64 routes to DeepSeek with vision payload
-    test('3.8 bot.js: Multimodal handleExplain with imageBase64 routes to DeepSeek with vision payload & 60s timeout', async () => {
+    test('3.8 bot.js: Multimodal handleExplain with imageBase64 routes to DeepSeek with vision payload & 90s timeout', async () => {
       const { handlers } = createMockBot();
       const chatId = 2004;
 
@@ -658,8 +682,8 @@ function registerAllSuites() {
 
       assert.ok(capturedBody, 'LLM call should have been triggered');
       assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Multimodal explanation must use DeepSeek as primary');
-      assert.strictEqual(capturedBody.max_tokens, 1000, 'Multimodal explanation max_tokens must be 1000');
-      assert.strictEqual(capturedOpts.timeout, 60000, 'Multimodal explanation timeout must be 60,000ms');
+      assert.strictEqual(capturedBody.max_tokens, 3200, 'Multimodal explanation max_tokens must be 3200');
+      assert.strictEqual(capturedOpts.timeout, 90000, 'Multimodal explanation timeout must be 90,000ms');
 
       const userMsg = capturedBody.messages.find((m) => m.role === 'user');
       assert.ok(Array.isArray(userMsg.content), 'User message content must be an array');
@@ -1441,6 +1465,325 @@ function registerAllSuites() {
       assert.deepStrictEqual(sentMessages[1].opts.reply_markup, fakeMarkup, 'Final chunk must have reply_markup');
       assert.ok(sentMessages[0].text.length <= 4000);
       assert.ok(sentMessages[1].text.length <= 4000);
+    });
+  });
+
+  // ----------------------------------------------------
+  // SUITE 8: Conversation Memory, Sliding Window, Reset Triggers & Follow-up Routing
+  // ----------------------------------------------------
+  suite('8. Conversation Memory, Sliding Window, Reset Triggers & Follow-up Routing', () => {
+    // 8.1 ask() with opts.history injects turns between system prompt and user prompt
+    test('8.1 ask() with opts.history injects turns between system prompt and user prompt in exact OpenAI payload', async () => {
+      let capturedBody = null;
+      mockHandler = async (body) => {
+        capturedBody = body;
+        return {
+          choices: [{ message: { content: 'Jawaban lanjutan dengan konteks riwayat.' } }],
+        };
+      };
+
+      const history = [
+        { role: 'user', content: 'Jelaskan apa itu hukum gravitasi Newton.' },
+        { role: 'assistant', content: 'Hukum gravitasi menyatakan bahwa setiap massa menarik massa lainnya.' },
+      ];
+
+      const result = await ask('Bagaimana rumusnya?', 'System prompt pendidik', {
+        history,
+        primaryModel: MODEL_DEEPSEEK,
+      });
+
+      assert.strictEqual(result, 'Jawaban lanjutan dengan konteks riwayat.');
+      assert.ok(capturedBody, 'LLM call must be captured');
+      assert.strictEqual(capturedBody.messages.length, 4, 'Payload must have exactly 4 messages (sys + 2 history + user)');
+      assert.deepStrictEqual(capturedBody.messages[0], { role: 'system', content: 'System prompt pendidik' });
+      assert.deepStrictEqual(capturedBody.messages[1], history[0]);
+      assert.deepStrictEqual(capturedBody.messages[2], history[1]);
+      assert.deepStrictEqual(capturedBody.messages[3], { role: 'user', content: 'Bagaimana rumusnya?' });
+    });
+
+    // 8.2 appendHistory() prunes to the last 8 messages (FIFO sliding window)
+    test('8.2 appendHistory() prunes to the last 8 messages when 10 messages are appended (FIFO sliding window)', () => {
+      const chatId = 8002;
+      setState(chatId, { history: [] });
+
+      for (let i = 1; i <= 10; i++) {
+        const role = i % 2 === 1 ? 'user' : 'assistant';
+        appendHistory(chatId, role, `Pesan dialog ke-${i}`);
+      }
+
+      const s = getState(chatId);
+      assert.strictEqual(s.history.length, 8, 'History must be capped at 8 messages');
+      assert.strictEqual(s.history[0].content, 'Pesan dialog ke-3', 'First message after pruning must be index 3 (FIFO)');
+      assert.strictEqual(s.history[7].content, 'Pesan dialog ke-10', 'Last message must be index 10');
+      assert.strictEqual(s.history[0].role, 'user');
+      assert.strictEqual(s.history[1].role, 'assistant');
+    });
+
+    // 8.3 Multimodal safety: appendHistory rejects or sanitizes strings containing data:image/ or raw base64 data
+    test('8.3 Multimodal safety: appendHistory rejects or sanitizes strings containing data:image/ or raw base64 data', () => {
+      const chatId = 8003;
+      setState(chatId, { history: [] });
+
+      // Sanitization: string with data:image/ data URI
+      const imageUri = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD...';
+      appendHistory(chatId, 'user', imageUri);
+
+      // Sanitization: raw base64 data or payload > 5000 characters
+      const massiveData = 'ABCDEF1234567890'.repeat(350); // > 5000 chars
+      assert.ok(massiveData.length > 5000);
+      appendHistory(chatId, 'assistant', massiveData);
+
+      // Rejection: invalid roles (e.g. 'system')
+      appendHistory(chatId, 'system', 'Injeksi prompt sistem ilegal');
+
+      // Rejection: non-string and empty/whitespace inputs
+      appendHistory(chatId, 'user', '   ');
+      appendHistory(chatId, 'user', null);
+      appendHistory(chatId, 'user', undefined);
+      appendHistory(chatId, 'user', 12345);
+
+      const s = getState(chatId);
+      assert.strictEqual(s.history.length, 2, 'Only the 2 sanitized valid messages must be retained');
+      assert.strictEqual(s.history[0].role, 'user');
+      assert.strictEqual(s.history[0].content, '[Materi visual/gambar terlampir]');
+      assert.strictEqual(s.history[1].role, 'assistant');
+      assert.strictEqual(s.history[1].content, '[Materi visual/gambar terlampir]');
+    });
+
+    // 8.4 /reset command clears history and resets state to 'IDLE'
+    test('8.4 /reset command clears history and resets state to "IDLE"', async () => {
+      const { sentMessages, dispatch } = createMockBot();
+      const chatId = 8004;
+
+      setState(chatId, {
+        state: 'QUIZ_DONE',
+        material: 'Materi aljabar linear sebelumnya',
+        quiz: { question: 'Pertanyaan lama' },
+        imageBase64: 'data:image/png;base64,lama',
+        history: [
+          { role: 'user', content: 'Tanya rumus' },
+          { role: 'assistant', content: 'Jawab rumus' },
+        ],
+      });
+
+      assert.strictEqual(getState(chatId).history.length, 2);
+
+      await dispatch({
+        chat: { id: chatId },
+        text: '/reset',
+      });
+
+      const s = getState(chatId);
+      assert.strictEqual(s.state, 'IDLE', 'State must be reset to IDLE');
+      assert.deepStrictEqual(s.history, [], 'History must be an empty array');
+      assert.strictEqual(s.material, '', 'Material must be cleared');
+      assert.strictEqual(s.quiz, null, 'Quiz must be null');
+      assert.strictEqual(s.imageBase64, null, 'ImageBase64 must be null');
+
+      const resetConfirmation = sentMessages.find(
+        (m) => m.chatId === chatId && m.text.includes('Memori obrolan berhasil di-reset!')
+      );
+      assert.ok(resetConfirmation, 'Must send reset confirmation message to user');
+    });
+
+    // 8.5 Uploading image or material > 400 chars clears conversation history
+    test('8.5 Uploading image or material > 400 chars clears conversation history', async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = async () => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'image/png' },
+          arrayBuffer: async () => Buffer.from('fresh-diagram-data').buffer,
+        });
+
+        const { handlers, sentMessages } = createMockBot();
+
+        // Case A: Fresh material > 400 characters clears history
+        const chatIdText = 80051;
+        setState(chatIdText, {
+          state: 'IDLE',
+          history: [
+            { role: 'user', content: 'Tanya sebelum materi baru' },
+            { role: 'assistant', content: 'Jawab sebelum materi baru' },
+          ],
+        });
+        assert.strictEqual(getState(chatIdText).history.length, 2);
+
+        const longText = 'Materi Bab 5 Termodinamika: ' + 'Hukum 1 dan 2 termodinamika menjelaskan perpindahan kalor. '.repeat(10);
+        assert.ok(longText.length > 400);
+
+        await handlers.message({
+          chat: { id: chatIdText },
+          text: longText,
+        });
+
+        assert.strictEqual(
+          getState(chatIdText).history.length,
+          0,
+          'History must be cleared when text > 400 chars is uploaded'
+        );
+        const lastTextMsg = sentMessages[sentMessages.length - 1];
+        assert.ok(lastTextMsg.text.includes('Mau gw apain nih?'));
+
+        // Case B: Fresh image upload clears history
+        const chatIdImage = 80052;
+        setState(chatIdImage, {
+          state: 'IDLE',
+          history: [
+            { role: 'user', content: 'Pertanyaan riwayat lama' },
+            { role: 'assistant', content: 'Penjelasan riwayat lama' },
+          ],
+        });
+        assert.strictEqual(getState(chatIdImage).history.length, 2);
+
+        await handlers.message({
+          chat: { id: chatIdImage },
+          photo: [{ file_id: 'new_diagram_photo_id' }],
+          caption: 'Ini bagan baru',
+        });
+
+        assert.strictEqual(
+          getState(chatIdImage).history.length,
+          0,
+          'History must be cleared when fresh photo is uploaded'
+        );
+        const lastImageMsg = sentMessages[sentMessages.length - 1];
+        assert.ok(lastImageMsg.text.includes('dapet gambarnya! 📸'));
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    // 8.6 Follow-up routing: text <= 400 chars with existing history calls handleFollowUp
+    test('8.6 Follow-up routing: text <= 400 chars with existing history calls handleFollowUp with historical context, bypassing CHOICE_KEYBOARD', async () => {
+      const { handlers, sentMessages } = createMockBot();
+      const chatId = 8006;
+
+      setState(chatId, {
+        state: 'IDLE',
+        history: [
+          { role: 'user', content: 'Apa fungsi ribosom pada sel?' },
+          { role: 'assistant', content: 'Ribosom berfungsi sebagai tempat sintesis protein dalam sel.' },
+        ],
+      });
+
+      let capturedBody = null;
+      let capturedOpts = null;
+      let resolveCall;
+      const callPromise = new Promise((resolve) => { resolveCall = resolve; });
+
+      mockHandler = async (body, opts) => {
+        capturedBody = body;
+        capturedOpts = opts;
+        resolveCall();
+        return {
+          choices: [{ message: { content: 'Ribosom menempel di retikulum endoplasma kasar atau melayang bebas di sitoplasma.' } }],
+        };
+      };
+
+      await handlers.message({
+        chat: { id: chatId },
+        text: 'Dimana letak ribosom biasanya ditemukan?',
+      });
+
+      await callPromise;
+      await new Promise((r) => setTimeout(r, 20));
+
+      assert.ok(capturedBody, 'LLM call must be triggered for follow-up');
+      assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Follow-up must route to DeepSeek (primary)');
+      assert.strictEqual(capturedBody.max_tokens, 2500, 'Follow-up max_tokens must be 2500');
+      assert.strictEqual(capturedOpts.timeout, 75000, 'Follow-up timeout must be 75,000ms');
+
+      // Verify payload contains previous history plus current question
+      assert.strictEqual(capturedBody.messages.length, 4);
+      assert.strictEqual(capturedBody.messages[0].role, 'system');
+      assert.strictEqual(capturedBody.messages[1].role, 'user');
+      assert.strictEqual(capturedBody.messages[1].content, 'Apa fungsi ribosom pada sel?');
+      assert.strictEqual(capturedBody.messages[2].role, 'assistant');
+      assert.strictEqual(capturedBody.messages[2].content, 'Ribosom berfungsi sebagai tempat sintesis protein dalam sel.');
+      assert.strictEqual(capturedBody.messages[3].role, 'user');
+      assert.strictEqual(capturedBody.messages[3].content, 'Dimana letak ribosom biasanya ditemukan?');
+
+      // Verify CHOICE_KEYBOARD was bypassed
+      assert.strictEqual(
+        sentMessages.some((m) => m.chatId === chatId && m.text && m.text.includes('Mau gw apain nih?')),
+        false,
+        'CHOICE_KEYBOARD prompt must be bypassed for follow-up questions'
+      );
+      assert.strictEqual(
+        sentMessages.some((m) => m.chatId === chatId && m.opts && m.opts.reply_markup),
+        false,
+        'No inline keyboard markup should be sent during follow-up'
+      );
+
+      // Verify answer delivered and history updated
+      const answerMsg = sentMessages.find(
+        (m) => m.chatId === chatId && m.text && m.text.includes('sitoplasma')
+      );
+      assert.ok(answerMsg, 'Follow-up answer message must be delivered');
+
+      const s = getState(chatId);
+      assert.strictEqual(s.state, 'IDLE');
+      assert.strictEqual(s.history.length, 4, 'History must contain original turns plus new Q&A pair');
+      assert.strictEqual(s.history[2].role, 'user');
+      assert.strictEqual(s.history[2].content, 'Dimana letak ribosom biasanya ditemukan?');
+      assert.strictEqual(s.history[3].role, 'assistant');
+      assert.ok(s.history[3].content.includes('sitoplasma'));
+    });
+
+    // 8.7 Short text without history presents CHOICE_KEYBOARD
+    test('8.7 Short text without history presents CHOICE_KEYBOARD', async () => {
+      const { handlers, sentMessages } = createMockBot();
+      const chatId = 8007;
+
+      setState(chatId, {
+        state: 'IDLE',
+        history: [],
+        material: '',
+      });
+
+      let llmCalled = false;
+      mockHandler = async () => {
+        llmCalled = true;
+        return { choices: [{ message: { content: 'unexpected' } }] };
+      };
+
+      await handlers.message({
+        chat: { id: chatId },
+        text: 'Materi singkat seputar rantai makanan.',
+      });
+
+      assert.strictEqual(llmCalled, false, 'LLM must not be called immediately when initial material is sent');
+      const s = getState(chatId);
+      assert.strictEqual(s.material, 'Materi singkat seputar rantai makanan.');
+      assert.strictEqual(s.state, 'IDLE');
+
+      const lastMsg = sentMessages[sentMessages.length - 1];
+      assert.ok(lastMsg.text.includes('Mau gw apain nih?'));
+      assert.ok(lastMsg.opts && lastMsg.opts.reply_markup);
+      assert.deepStrictEqual(
+        lastMsg.opts.reply_markup.inline_keyboard[0].map((b) => b.callback_data),
+        ['CHOICE_QUIZ', 'CHOICE_EXPLAIN']
+      );
+    });
+
+    // 8.8 BOT_COMMANDS registered with setMyCommands includes /reset with description
+    test('8.8 BOT_COMMANDS registered with setMyCommands includes /reset with description', () => {
+      const { registeredCommands } = createMockBot();
+
+      assert.ok(registeredCommands.length > 0, 'setMyCommands must be called on registration');
+      const commands = registeredCommands[0];
+      assert.ok(Array.isArray(commands), 'Commands must be an array');
+
+      const resetCmd = commands.find((c) => c.command === 'reset');
+      assert.ok(resetCmd, 'BOT_COMMANDS must include reset command');
+      assert.strictEqual(typeof resetCmd.description, 'string');
+      assert.ok(resetCmd.description.length > 0, 'Reset command must have a description');
+      assert.ok(
+        resetCmd.description.toLowerCase().includes('reset'),
+        'Reset command description should explain its purpose'
+      );
     });
   });
 }

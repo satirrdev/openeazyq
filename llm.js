@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const OpenAI = require('openai');
 
-const TIMEOUT_MS = 45000;
+const TIMEOUT_MS = 75000;
 const ERROR_MSG = 'Server AI lagi sibuk nih, coba kirim ulang materi lu bentar lagi ya.';
 
 const client = new OpenAI({
@@ -66,12 +66,26 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
       ]
     : prompt;
 
+  const messages = [{ role: 'system', content: systemPrompt }];
+
+  if (Array.isArray(opts.history) && opts.history.length > 0) {
+    for (const h of opts.history) {
+      if (
+        h &&
+        (h.role === 'user' || h.role === 'assistant') &&
+        typeof h.content === 'string' &&
+        h.content.trim()
+      ) {
+        messages.push({ role: h.role, content: h.content.trim() });
+      }
+    }
+  }
+
+  messages.push({ role: 'user', content: userContent });
+
   const body = {
     model: modelName,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userContent },
-    ],
+    messages,
     temperature: 0.7,
   };
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;

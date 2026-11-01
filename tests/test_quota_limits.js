@@ -1084,13 +1084,14 @@ function registerAllSuites() {
       assert.strictEqual(quotaPrem.remaining, Infinity);
     });
 
-    test('7.2 bot.setMyCommands is called on register(bot) with start, ceklimit, and iduser', () => {
+    test('7.2 bot.setMyCommands is called on register(bot) with start, reset, ceklimit, and iduser', () => {
       const { commandsCalls } = createMockBot();
       assert.strictEqual(commandsCalls.length, 1);
       assert.deepStrictEqual(
         commandsCalls[0],
         [
           { command: 'start', description: 'Mulai bot & panduan belajar' },
+          { command: 'reset', description: 'Reset ingatan percakapan & materi' },
           { command: 'ceklimit', description: 'Cek sisa limit kuis harian' },
           { command: 'iduser', description: 'Lihat ID Telegram untuk upgrade' },
         ]

@@ -28,18 +28,48 @@ function cleanMarkdown(text) {
 }
 
 // Per-chat quiz state: IDLE | QUIZ_ACTIVE | AWAITING_ANSWER
-// Registry shape: { state, quiz, messageId }
+// Registry shape: { state, quiz, messageId, history }
 const state = new Map();
 
 function getState(chatId) {
-  if (!state.has(chatId)) state.set(chatId, { state: 'IDLE', quiz: null, messageId: null });
-  return state.get(chatId);
+  if (!state.has(chatId)) {
+    state.set(chatId, {
+      state: 'IDLE',
+      quiz: null,
+      messageId: null,
+      history: [],
+    });
+  }
+  const s = state.get(chatId);
+  if (!Array.isArray(s.history)) {
+    s.history = [];
+  }
+  return s;
 }
 
 function setState(chatId, patch) {
   const s = getState(chatId);
   Object.assign(s, patch);
   return s;
+}
+
+function appendHistory(chatId, role, content) {
+  if (role !== 'user' && role !== 'assistant') return;
+  if (typeof content !== 'string' || !content.trim()) return;
+  let cleanContent = content.trim();
+  if (cleanContent.includes('data:image/') || cleanContent.length > 5000) {
+    cleanContent = '[Materi visual/gambar terlampir]';
+  }
+  const s = getState(chatId);
+  s.history.push({ role, content: cleanContent });
+  if (s.history.length > 8) {
+    s.history = s.history.slice(-8);
+  }
+}
+
+function clearHistory(chatId) {
+  const s = getState(chatId);
+  s.history = [];
 }
 
 // Ask what the user wants done with their material (per plan: ask each time)
@@ -130,6 +160,7 @@ async function downloadTelegramImageAsBase64(bot, fileId, defaultMime = 'image/j
 function register(bot) {
   const BOT_COMMANDS = [
     { command: 'start', description: 'Mulai bot & panduan belajar' },
+    { command: 'reset', description: 'Reset ingatan percakapan & materi' },
     { command: 'ceklimit', description: 'Cek sisa limit kuis harian' },
     { command: 'iduser', description: 'Lihat ID Telegram untuk upgrade' },
   ];
@@ -139,8 +170,25 @@ function register(bot) {
     });
   }
 
+  bot.onText(/\/reset/, (msg) => {
+    const chatId = msg.chat.id;
+    clearHistory(chatId);
+    setState(chatId, {
+      state: 'IDLE',
+      quiz: null,
+      messageId: null,
+      material: '',
+      imageBase64: null,
+    });
+    bot.sendMessage(
+      chatId,
+      'Memori obrolan berhasil di-reset! Kirim materi atau pertanyaan baru yuk 🚀'
+    );
+  });
+
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
+    clearHistory(chatId);
     setState(chatId, { state: 'IDLE', quiz: null, messageId: null, imageBase64: null });
     bot.sendMessage(
       chatId,
@@ -278,6 +326,7 @@ function register(bot) {
     }
 
     if (isImage) {
+      clearHistory(chatId);
       try {
         const fileId = isPhoto ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
         const mimeType = isImageDoc ? msg.document.mime_type : 'image/jpeg';
@@ -304,12 +353,36 @@ function register(bot) {
       return;
     }
 
-    // Regular text material
+    // Text material routing: check if fresh material or contextual follow-up question
+    const rawText = (msg.text || '').trim();
+    if (rawText.length > 400) {
+      clearHistory(chatId);
+      setState(chatId, {
+        state: 'IDLE',
+        quiz: null,
+        messageId: null,
+        material: rawText,
+        imageBase64: null,
+      });
+
+      bot.sendMessage(
+        chatId,
+        'Oke, dapet materinya! 📥\nMau gw apain nih?',
+        { reply_markup: CHOICE_KEYBOARD }
+      );
+      return;
+    }
+
+    if ((s.state === 'IDLE' || s.state === 'QUIZ_DONE') && s.history && s.history.length > 0) {
+      handleFollowUp(chatId, rawText);
+      return;
+    }
+
     setState(chatId, {
       state: 'IDLE',
       quiz: null,
       messageId: null,
-      material: msg.text,
+      material: rawText,
       imageBase64: null,
     });
 
@@ -441,13 +514,40 @@ function register(bot) {
       const reply = await ask(prompt, HINT_SYSTEM_PROMPT, {
         primaryModel: MODEL_DEEPSEEK,
         fallbackModel: MODEL_MIMO,
-        maxTokens: 250,
+        maxTokens: 400,
         timeoutMs: 30000,
       });
       await sendSmart(bot, chatId, cleanMarkdown(reply));
     } catch (e) {
       console.error('Hint error:', e);
       await sendSmart(bot, chatId, 'Nope, soalnya udah dikunci 🔒 Fokus jawab yang ada ya, lu pasti bisa! 💪');
+    } finally {
+      clearInterval(typing);
+    }
+  }
+
+  async function handleFollowUp(chatId, question) {
+    const s = getState(chatId);
+    setState(chatId, { state: 'EXPLAIN_ACTIVE' });
+    const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
+
+    try {
+      const reply = await ask(question, EXPLAIN_SYSTEM_PROMPT, {
+        primaryModel: MODEL_DEEPSEEK,
+        fallbackModel: MODEL_MIMO,
+        maxTokens: 2500,
+        timeoutMs: 75000,
+        history: s.history,
+      });
+
+      appendHistory(chatId, 'user', question);
+      appendHistory(chatId, 'assistant', reply);
+      setState(chatId, { state: 'IDLE' });
+      await sendSmart(bot, chatId, cleanMarkdown(reply));
+    } catch (e) {
+      console.error('Follow-up error:', e);
+      setState(chatId, { state: 'IDLE' });
+      bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
     } finally {
       clearInterval(typing);
     }
@@ -488,8 +588,8 @@ function register(bot) {
       const isHeavy = Boolean(imageBase64) || complexity === 'heavy';
       const primaryModel = MODEL_DEEPSEEK;
       const fallbackModel = imageBase64 ? null : MODEL_MIMO;
-      const maxTokens = isHeavy ? 1000 : 750;
-      const timeoutMs = isHeavy ? 60000 : 45000;
+      const maxTokens = isHeavy ? 3200 : 2500;
+      const timeoutMs = isHeavy ? 90000 : 75000;
 
       const prompt = imageBase64 && (!trimmed || !trimmed.trim())
         ? 'Jelaskan materi yang ada pada gambar berikut secara bertahap dan mudah dipahami.'
@@ -500,6 +600,13 @@ function register(bot) {
         EXPLAIN_SYSTEM_PROMPT,
         { primaryModel, fallbackModel, maxTokens, timeoutMs, imageBase64 }
       );
+
+      const userDescriptor = trimmed || (imageBase64 ? '[Materi visual/gambar terlampir]' : '');
+      if (userDescriptor) {
+        appendHistory(chatId, 'user', userDescriptor);
+      }
+      appendHistory(chatId, 'assistant', explanation);
+
       await sendSmart(bot, chatId, cleanMarkdown(explanation));
       setState(chatId, { state: 'IDLE', imageBase64: null });
     } catch (e) {
@@ -514,6 +621,8 @@ module.exports = {
   register,
   getState,
   setState,
+  appendHistory,
+  clearHistory,
   downloadTelegramImageAsBase64,
   sendSmart,
   splitIntoChunks,

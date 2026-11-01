@@ -42,8 +42,9 @@ State is stored in an in-memory Map in `bot.js` keyed by `chatId`.
 Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse entities` on unescaped symbols (`_`, `*`, `[`, `` ` ``) frequently produced in math or LLM answers.
 - **Always send via `sendSmart(bot, chatId, text, opts)`:**
   1. Converts LaTeX to Unicode via `latexToUnicode()` in `math.js`.
-  2. Attempts Markdown delivery.
-  3. Catches entity parse errors and falls back to plain text with formatting tokens stripped.
+  2. Splits payloads > 4000 characters via `splitIntoChunks()` to respect Telegram's message length limits.
+  3. Attempts Markdown delivery.
+  4. Catches entity parse errors and falls back to plain text with formatting tokens stripped.
 - Clean raw LLM text with `cleanMarkdown()` before sending to strip stray fences and convert Markdown headings (`#`) to bold (`**`).
 
 ## 6. LLM Integration & Robustness Rules
@@ -53,9 +54,10 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
   - All workflows (quiz, explanation, hint) route to `deepseek-v4.1-flash:free` as the primary model.
   - Text-only prompts retain `mimo-v2.6-flash:free` as an automatic failover model.
 - **Token Budgeting & Timeouts:**
-  - Quiz generation: `max_tokens: 450`, timeout `30s` (light) / `45s` (heavy or image).
-  - Explanations: `max_tokens: 750` (light, timeout `45s`) / `1000` (heavy or image, timeout `60s`).
-  - Hints: `max_tokens: 250`, timeout `30s` (text-only).
+  - Default module timeout: `75s` (`75000ms`).
+  - Quiz generation: `max_tokens: 800`, timeout `30s` (light) / `45s` (heavy or image).
+  - Explanations: `max_tokens: 2500` (light, timeout `75s`) / `3200` (heavy or image, timeout `90s`).
+  - Hints: `max_tokens: 400`, timeout `30s` (text-only).
 - **JSON Parsing:** Always use `extractJson()` in `llm.js`. It strips fences, slices `{ ... }`, and automatically repairs trailing commas before parsing.
 - **Prompt Guard:** Keep the prompt rule prohibiting models from calculating/deriving math solutions; models must only output the JSON schema.
 - **Languages:** All user-facing bot messages, buttons, and error notices must remain in casual Indonesian (*Bahasa Indonesia santai*). Developer logs and internal docs remain in English.
@@ -79,5 +81,12 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
   - `/ceklimit`: Displays user quota status (remaining/total for free users, or active premium status with Jakarta expiry date).
   - `/iduser`: Sends caller's Telegram user ID (`msg.from.id`) to provide to the owner for manual upgrade.
   - `/upgrade <userId> <days>`: Restricted to `ADMIN_ID`. Extends active premium or starts fresh from `Date.now()`. Notifies the target user upon success.
-  - `setMyCommands`: Registers Telegram menu shortcuts (`start`, `ceklimit`, `iduser`) upon startup with graceful error handling.
+  - `setMyCommands`: Registers Telegram menu shortcuts (`start`, `reset`, `ceklimit`, `iduser`) upon startup with graceful error handling.
+
+## 9. Conversation Memory & Context Window
+- **Sliding Window:** In-memory `history` array inside `getState(chatId)` retains up to 8 messages (4 user-assistant turns).
+- **FIFO Pruning:** `appendHistory()` automatically trims oldest entries when exceeding 8 messages.
+- **Multimodal Safety:** Raw Base64 data URLs are never stored in `history`; image inputs are replaced with placeholder `[Materi visual/gambar terlampir]`.
+- **Follow-up Routing:** Short user messages (<= 400 chars) sent while `history` is active are routed directly to `handleFollowUp()` without presenting `CHOICE_KEYBOARD`.
+- **Reset Triggers:** Memory is cleared upon `/reset`, `/start`, new image uploads, or text material exceeding 400 characters.
 

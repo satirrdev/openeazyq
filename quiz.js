@@ -113,7 +113,7 @@ async function generateQuiz(material, imageBase64 = null) {
         {
           primaryModel,
           fallbackModel,
-          maxTokens: 450,
+          maxTokens: 800,
           timeoutMs,
           imageBase64,
         }
