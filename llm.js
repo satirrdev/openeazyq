@@ -29,30 +29,113 @@ function stripFences(text) {
   return out.trim();
 }
 
+// Auto-repair truncated JSON where output was cut off mid-sentence or mid-object
+function repairTruncatedJson(str) {
+  let inString = false;
+  let escaped = false;
+  const openStack = [];
+  let parenDepthInString = 0;
+  let repaired = '';
+
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inString) {
+      repaired += c;
+      if (escaped) {
+        escaped = false;
+      } else if (c === '\\') {
+        escaped = true;
+      } else if (c === '"') {
+        inString = false;
+      } else if (c === '(') {
+        parenDepthInString++;
+      } else if (c === ')') {
+        if (parenDepthInString > 0) parenDepthInString--;
+      }
+    } else {
+      if (c === '"') {
+        inString = true;
+        parenDepthInString = 0;
+        repaired += c;
+      } else if (c === '{' || c === '[') {
+        openStack.push(c);
+        repaired += c;
+      } else if (c === '}') {
+        if (openStack.length > 0 && openStack[openStack.length - 1] === '{') {
+          openStack.pop();
+        }
+        repaired += c;
+      } else if (c === ']') {
+        if (openStack.length > 0 && openStack[openStack.length - 1] === '[') {
+          openStack.pop();
+        }
+        repaired += c;
+      } else if (c === ')') {
+        // If stray closing parenthesis is outside string instead of closing brace, ignore
+        if (openStack.length > 0 && openStack[openStack.length - 1] === '{') {
+          continue;
+        }
+        repaired += c;
+      } else {
+        repaired += c;
+      }
+    }
+  }
+
+  // If text was cut off while still inside a string literal
+  if (inString) {
+    if (parenDepthInString > 0) {
+      repaired += ')'.repeat(parenDepthInString);
+    }
+    repaired += '"';
+  }
+
+  // Trim trailing whitespace, stray colons, or commas before closing
+  repaired = repaired.replace(/[:,\s]+$/, '');
+
+  // Close any unclosed braces or brackets in reverse order
+  while (openStack.length > 0) {
+    const top = openStack.pop();
+    if (top === '{') repaired += '}';
+    else if (top === '[') repaired += ']';
+  }
+
+  // Remove trailing commas before closing braces/brackets
+  return repaired.replace(/,\s*([}\]])/g, '$1');
+}
+
 // Try to extract the first valid JSON object from raw LLM output with auto-repair
 function extractJson(raw) {
   const cleaned = stripFences(raw);
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    // Fallback: grab from first { to last }
     const start = cleaned.indexOf('{');
+    if (start === -1) throw e;
+
     const end = cleaned.lastIndexOf('}');
-    if (start !== -1 && end > start) {
+    if (end > start) {
       const slice = cleaned.slice(start, end + 1);
       try {
         return JSON.parse(slice);
       } catch (e2) {
-        // Auto-repair: remove trailing commas before closing braces/brackets
         try {
           const repaired = slice.replace(/,\s*([}\]])/g, '$1');
           return JSON.parse(repaired);
         } catch (e3) {
-          throw e;
+          // Fall through to truncation repair
         }
       }
     }
-    throw e;
+
+    // Truncation repair for cut-off JSON
+    try {
+      const fromStart = cleaned.slice(start);
+      const repaired = repairTruncatedJson(fromStart);
+      return JSON.parse(repaired);
+    } catch (e4) {
+      throw e;
+    }
   }
 }
 
@@ -86,18 +169,36 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   const body = {
     model: modelName,
     messages,
-    temperature: 0.7,
+    temperature: typeof opts.temperature === 'number' ? opts.temperature : 0.2,
   };
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
+  if (Array.isArray(opts.stop) && opts.stop.length > 0) {
+    body.stop = opts.stop;
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const completion = await client.chat.completions.create(body, {
-      signal: controller.signal,
-      timeout: timeoutMs,
-    });
+    let completion;
+    try {
+      completion = await client.chat.completions.create(body, {
+        signal: controller.signal,
+        timeout: timeoutMs,
+      });
+    } catch (createErr) {
+      // If provider rejects stop sequences, retry once without stop parameter
+      if (body.stop && /stop/i.test(createErr.message || '')) {
+        const bodyWithoutStop = { ...body };
+        delete bodyWithoutStop.stop;
+        completion = await client.chat.completions.create(bodyWithoutStop, {
+          signal: controller.signal,
+          timeout: timeoutMs,
+        });
+      } else {
+        throw createErr;
+      }
+    }
     const choice = completion.choices && completion.choices[0];
     const message = choice && choice.message;
     const content = message && typeof message.content === 'string' ? message.content.trim() : '';

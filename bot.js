@@ -1,6 +1,17 @@
 const { ask, extractJson, MODEL_DEEPSEEK, MODEL_MIMO } = require('./llm');
 const { latexToUnicode } = require('./math');
-const { canTakeQuiz, recordQuizUsage, upgradeUser, getUserQuota } = require('./store');
+const {
+  canTakeQuiz,
+  canExplain,
+  canUploadImage,
+  recordQuizUsage,
+  recordExplainUsage,
+  recordImageUsage,
+  upgradeUser,
+  getUserQuota,
+  DAILY_EXPLAIN_LIMIT,
+  DAILY_IMAGE_LIMIT,
+} = require('./store');
 const {
   EXPLAIN_SYSTEM_PROMPT,
   HINT_SYSTEM_PROMPT,
@@ -28,29 +39,57 @@ function cleanMarkdown(text) {
 }
 
 // Per-chat quiz state: IDLE | QUIZ_ACTIVE | AWAITING_ANSWER
-// Registry shape: { state, quiz, messageId, history }
+// Registry shape: { state, quiz, messageId, history, lastActivity }
 const state = new Map();
+const IDLE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 function getState(chatId) {
+  const now = Date.now();
+  if (state.has(chatId)) {
+    const existing = state.get(chatId);
+    if (existing && existing.lastActivity && now - existing.lastActivity > IDLE_TTL_MS) {
+      // User idle for > 30 minutes: purge session data
+      state.delete(chatId);
+    }
+  }
   if (!state.has(chatId)) {
     state.set(chatId, {
       state: 'IDLE',
       quiz: null,
       messageId: null,
       history: [],
+      lastActivity: now,
     });
   }
   const s = state.get(chatId);
   if (!Array.isArray(s.history)) {
     s.history = [];
   }
+  s.lastActivity = now;
   return s;
 }
 
 function setState(chatId, patch) {
   const s = getState(chatId);
-  Object.assign(s, patch);
+  Object.assign(s, patch, { lastActivity: Date.now() });
   return s;
+}
+
+function cleanupIdleUsers(ttlMs = IDLE_TTL_MS) {
+  const now = Date.now();
+  let purged = 0;
+  for (const [chatId, s] of state.entries()) {
+    if (s && s.lastActivity && now - s.lastActivity > ttlMs) {
+      state.delete(chatId);
+      purged++;
+    }
+  }
+  return purged;
+}
+
+const idleSweepInterval = setInterval(() => cleanupIdleUsers(), 5 * 60 * 1000);
+if (typeof idleSweepInterval.unref === 'function') {
+  idleSweepInterval.unref();
 }
 
 function appendHistory(chatId, role, content) {
@@ -198,14 +237,16 @@ function register(bot) {
     }
 
     const rawArgs = match && match[1] ? match[1].trim() : '';
+    const userText = rawArgs;
+    const cleanMaterial = userText.slice(0, 1500); // Cap input at 1500 characters
 
     // Direct material provided in command argument
-    if (rawArgs) {
-      if (rawArgs.length > 400) {
+    if (cleanMaterial) {
+      if (cleanMaterial.length > 400) {
         clearHistory(chatId);
       }
       setState(chatId, {
-        material: rawArgs,
+        material: cleanMaterial,
         imageBase64: null,
       });
       await handleQuiz(chatId);
@@ -283,35 +324,38 @@ function register(bot) {
         bot,
         msg.chat.id,
         `📊 *Status Limit Kamu*\n\n` +
-        `Status: ⭐ Premium (Unlimited Kuis)\n` +
+        `Status: ⭐ Premium (Unlimited Kuis, Penjelasan, & Gambar)\n` +
         `Aktif sampai: ${expiryDate} WIB\n\n` +
         `Gaskeun latihan sepuasnya tanpa batas harian! 🚀`
       );
       return;
     }
 
-    if (quota.remaining === 0) {
-      await sendSmart(
-        bot,
-        msg.chat.id,
-        `📊 *Status Limit Kamu*\n\n` +
-        `Status: Free\n` +
-        `Sisa Kuis Hari Ini: 0/${quota.total} (Habis)\n` +
-        `Reset setiap 00:00 WIB\n\n` +
-        `Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx`
-      );
-      return;
+    const quizRemaining = quota.quiz ? quota.quiz.remaining : quota.remaining;
+    const quizTotal = quota.quiz ? quota.quiz.total : quota.total;
+    const explainRemaining = quota.explain ? quota.explain.remaining : 15;
+    const explainTotal = quota.explain ? quota.explain.total : 15;
+    const imageRemaining = quota.image ? quota.image.remaining : 5;
+    const imageTotal = quota.image ? quota.image.total : 5;
+
+    const quizDisplay = quizRemaining === 0 ? `0/${quizTotal} (Habis)` : `${quizRemaining}/${quizTotal}`;
+    const explainDisplay = explainRemaining === 0 ? `0/${explainTotal} (Habis)` : `${explainRemaining}/${explainTotal}`;
+    const imageDisplay = imageRemaining === 0 ? `0/${imageTotal} (Habis)` : `${imageRemaining}/${imageTotal}`;
+
+    let text = `📊 *Status Limit Kamu*\n\n` +
+      `Status: Free\n` +
+      `Sisa Kuis Hari Ini: ${quizDisplay}\n` +
+      `Sisa Penjelasan Hari Ini: ${explainDisplay}\n` +
+      `Sisa Upload Gambar Hari Ini: ${imageDisplay}\n` +
+      `Reset setiap 00:00 WIB\n\n`;
+
+    if (quizRemaining === 0) {
+      text += 'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx';
+    } else {
+      text += 'Kirim catatan atau materi kamu ke sini buat mulai kuis! 🚀';
     }
 
-    await sendSmart(
-      bot,
-      msg.chat.id,
-      `📊 *Status Limit Kamu*\n\n` +
-      `Status: Free\n` +
-      `Sisa Kuis Hari Ini: ${quota.remaining}/${quota.total}\n` +
-      `Reset setiap 00:00 WIB\n\n` +
-      `Kirim catatan atau materi kamu ke sini buat mulai kuis! 🚀`
-    );
+    await sendSmart(bot, msg.chat.id, text);
   });
 
   bot.onText(/\/iduser/, (msg) => {
@@ -395,18 +439,29 @@ function register(bot) {
     }
 
     if (isImage) {
+      const userId = msg.from ? msg.from.id : chatId;
+      if (!canUploadImage(userId)) {
+        bot.sendMessage(
+          chatId,
+          'Limit upload Gambar kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+        );
+        return;
+      }
+
       clearHistory(chatId);
       try {
         const fileId = isPhoto ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
         const mimeType = isImageDoc ? msg.document.mime_type : 'image/jpeg';
         const imageBase64 = await downloadTelegramImageAsBase64(bot, fileId, mimeType);
-        const caption = typeof msg.caption === 'string' ? msg.caption.trim() : '';
+        const userText = typeof msg.caption === 'string' ? msg.caption.trim() : '';
+        const cleanMaterial = userText.slice(0, 1500); // Cap input at 1500 characters
+        recordImageUsage(userId);
 
         setState(chatId, {
           state: 'IDLE',
           quiz: null,
           messageId: null,
-          material: caption,
+          material: cleanMaterial,
           imageBase64,
         });
 
@@ -423,14 +478,15 @@ function register(bot) {
     }
 
     // Text material routing: check if fresh material or contextual follow-up question
-    const rawText = (msg.text || '').trim();
-    if (rawText.length > 400) {
+    const userText = (msg.text || '').trim();
+    const cleanMaterial = userText.slice(0, 1500); // Cap input at 1500 characters
+    if (cleanMaterial.length > 400) {
       clearHistory(chatId);
       setState(chatId, {
         state: 'IDLE',
         quiz: null,
         messageId: null,
-        material: rawText,
+        material: cleanMaterial,
         imageBase64: null,
       });
 
@@ -443,7 +499,7 @@ function register(bot) {
     }
 
     if ((s.state === 'IDLE' || s.state === 'QUIZ_DONE') && s.history && s.history.length > 0) {
-      handleFollowUp(chatId, rawText);
+      handleFollowUp(chatId, cleanMaterial);
       return;
     }
 
@@ -451,7 +507,7 @@ function register(bot) {
       state: 'IDLE',
       quiz: null,
       messageId: null,
-      material: rawText,
+      material: cleanMaterial,
       imageBase64: null,
     });
 
@@ -484,6 +540,19 @@ function register(bot) {
           bot.sendMessage(
             chatId,
             'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+          );
+          return;
+        }
+
+        if (data === 'CHOICE_EXPLAIN' && !canExplain(chatId)) {
+          await bot.answerCallbackQuery(query.id);
+          await bot.editMessageReplyMarkup(undefined, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+          }).catch(() => {});
+          bot.sendMessage(
+            chatId,
+            'Limit Penjelasan kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
           );
           return;
         }
@@ -571,7 +640,7 @@ function register(bot) {
       const optionsText = Object.entries(quiz.options)
         .map(([k, v]) => `${k}. ${v}`)
         .join('\n');
-      const MAX_CHARS = 2000;
+      const MAX_CHARS = 1500;
       const material = (s.material || '').slice(0, MAX_CHARS);
       const prompt =
         `Materi:\n${material}\n\n` +
@@ -582,6 +651,7 @@ function register(bot) {
         fallbackModel: MODEL_MIMO,
         maxTokens: 400,
         timeoutMs: 30000,
+        temperature: 0.2,
       });
       await sendSmart(bot, chatId, cleanMarkdown(reply));
     } catch (e) {
@@ -593,21 +663,32 @@ function register(bot) {
   }
 
   async function handleFollowUp(chatId, question) {
+    if (!canExplain(chatId)) {
+      bot.sendMessage(
+        chatId,
+        'Limit Penjelasan kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+      );
+      return;
+    }
+
     const s = getState(chatId);
     setState(chatId, { state: 'EXPLAIN_ACTIVE' });
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
     try {
-      const reply = await ask(question, EXPLAIN_SYSTEM_PROMPT, {
+      const cleanQuestion = (question || '').slice(0, 1500);
+      const reply = await ask(cleanQuestion, EXPLAIN_SYSTEM_PROMPT, {
         primaryModel: MODEL_DEEPSEEK,
         fallbackModel: MODEL_MIMO,
         maxTokens: 2500,
         timeoutMs: 75000,
         history: s.history,
+        temperature: 0.2,
       });
 
-      appendHistory(chatId, 'user', question);
+      appendHistory(chatId, 'user', cleanQuestion);
       appendHistory(chatId, 'assistant', reply);
+      recordExplainUsage(chatId);
       setState(chatId, { state: 'IDLE' });
       await sendSmart(bot, chatId, cleanMarkdown(reply));
     } catch (e) {
@@ -651,7 +732,7 @@ function register(bot) {
     bot.sendMessage(chatId, 'Oke, lagi gw jelasin materinya nih... ⏳');
 
     try {
-      const MAX_CHARS = 3000;
+      const MAX_CHARS = 1500;
       const trimmed = (material || '').slice(0, MAX_CHARS);
       const complexity = classifyComplexity(trimmed);
       const isHeavy = Boolean(imageBase64) || complexity === 'heavy';
@@ -667,7 +748,7 @@ function register(bot) {
       const explanation = await ask(
         prompt,
         EXPLAIN_SYSTEM_PROMPT,
-        { primaryModel, fallbackModel, maxTokens, timeoutMs, imageBase64 }
+        { primaryModel, fallbackModel, maxTokens, timeoutMs, imageBase64, temperature: 0.2 }
       );
 
       const userDescriptor = trimmed || (imageBase64 ? '[Materi visual/gambar terlampir]' : '');
@@ -677,6 +758,7 @@ function register(bot) {
       appendHistory(chatId, 'assistant', explanation);
 
       await sendSmart(bot, chatId, cleanMarkdown(explanation));
+      recordExplainUsage(chatId);
       setState(chatId, { state: 'IDLE', imageBase64: null });
     } catch (e) {
       console.error('Explain error:', e);
@@ -692,6 +774,8 @@ module.exports = {
   setState,
   appendHistory,
   clearHistory,
+  cleanupIdleUsers,
+  IDLE_TTL_MS,
   downloadTelegramImageAsBase64,
   sendSmart,
   splitIntoChunks,

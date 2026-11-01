@@ -234,11 +234,13 @@ function withMockTime(isoStringOrTimestamp, fn) {
 
 function registerAllSuites() {
   suite('1. store.js: Free User Quota & Daily Limit Logic', () => {
-    test('1.1 New free user initializes with quizCount = 0 and premiumUntil = 0', () => {
+    test('1.1 New free user initializes with quizCount = 0, explainCount = 0, imageCount = 0, and premiumUntil = 0', () => {
       const userId = 'user_init_' + Date.now();
       const user = store.getUser(userId);
 
       assert.strictEqual(user.quizCount, 0, 'New user quizCount must be 0');
+      assert.strictEqual(user.explainCount, 0, 'New user explainCount must be 0');
+      assert.strictEqual(user.imageCount, 0, 'New user imageCount must be 0');
       assert.strictEqual(user.premiumUntil, 0, 'New user premiumUntil must be 0');
       assert.strictEqual(user.lastQuizDate, store.getTodayWIB(), 'New user lastQuizDate must be today WIB');
     });
@@ -311,6 +313,26 @@ function registerAllSuites() {
       assert.strictEqual(store.canTakeQuiz(userB), true, 'User B must still have full quota');
       assert.strictEqual(store.getUser(userB).quizCount, 0, 'User B quizCount must remain 0');
     });
+
+    test('1.7 canExplain allows up to 15 usages for free user and blocks on 16th', () => {
+      const userId = 'user_explain_limit_' + Date.now();
+      for (let i = 1; i <= 15; i++) {
+        assert.strictEqual(store.canExplain(userId), true, `canExplain must be true before usage ${i}`);
+        store.recordExplainUsage(userId);
+        assert.strictEqual(store.getUser(userId).explainCount, i);
+      }
+      assert.strictEqual(store.canExplain(userId), false, 'canExplain must return false on 16th attempt');
+    });
+
+    test('1.8 canUploadImage allows up to 5 uploads for free user and blocks on 6th', () => {
+      const userId = 'user_image_limit_' + Date.now();
+      for (let i = 1; i <= 5; i++) {
+        assert.strictEqual(store.canUploadImage(userId), true, `canUploadImage must be true before upload ${i}`);
+        store.recordImageUsage(userId);
+        assert.strictEqual(store.getUser(userId).imageCount, i);
+      }
+      assert.strictEqual(store.canUploadImage(userId), false, 'canUploadImage must return false on 6th attempt');
+    });
   });
 
   suite('2. store.js: Lazy Reset on 00:00 WIB', () => {
@@ -319,10 +341,14 @@ function registerAllSuites() {
       const user = store.getUser(userId);
 
       user.quizCount = 5;
+      user.explainCount = 15;
+      user.imageCount = 5;
       user.lastQuizDate = '2026-01-01';
 
       const reloadedUser = store.getUser(userId);
       assert.strictEqual(reloadedUser.quizCount, 0, 'quizCount must reset to 0 for a past date');
+      assert.strictEqual(reloadedUser.explainCount, 0, 'explainCount must reset to 0 for a past date');
+      assert.strictEqual(reloadedUser.imageCount, 0, 'imageCount must reset to 0 for a past date');
       assert.strictEqual(
         reloadedUser.lastQuizDate,
         store.getTodayWIB(),
@@ -993,7 +1019,7 @@ function registerAllSuites() {
       }
     });
 
-    test('6.7 CHOICE_EXPLAIN is unlimited: succeeds and never checks or consumes quota', async () => {
+    test('6.7 CHOICE_EXPLAIN checks explain quota (limit 15) and increments after delivery', async () => {
       const { dispatchCallback, sentMessages } = createMockBot();
       const chatId = 6007;
 
@@ -1004,32 +1030,83 @@ function registerAllSuites() {
       assert.strictEqual(store.getUser(chatId).quizCount, 5);
 
       mockCompletionHandler = async () => ({
-        choices: [{ message: { content: 'Ini penjelasan konsep fotosintesis tanpa batas!' } }],
+        choices: [{ message: { content: 'Ini penjelasan konsep fotosintesis padat dan berbobot!' } }],
       });
 
       setState(chatId, { state: 'IDLE', material: 'Fotosintesis pada daun' });
 
       await dispatchCallback({
-        id: 'cb_explain_unlimited',
+        id: 'cb_explain_quota',
         data: 'CHOICE_EXPLAIN',
         message: { chat: { id: chatId }, message_id: 105 },
       });
 
       await waitForState(chatId, (s) => s.state === 'IDLE');
 
-      assert.strictEqual(
-        store.getUser(chatId).quizCount,
-        5,
-        'quizCount must remain 5 (explanations do not consume quota)'
-      );
-
-      const blockNotice = sentMessages.find((m) => m.text === EXACT_QUOTA_EXHAUSTED_MSG);
-      assert.strictEqual(blockNotice, undefined, 'Must not send quota exhausted block message');
+      assert.strictEqual(store.getUser(chatId).quizCount, 5, 'quizCount must remain 5');
+      assert.strictEqual(store.getUser(chatId).explainCount, 1, 'explainCount must increment to 1');
 
       const explainMsg = sentMessages.find((m) => m.chatId === chatId && m.text.includes('Ini penjelasan konsep fotosintesis'));
       assert.ok(explainMsg, 'Explanation should be delivered successfully');
 
+      // Now exhaust explain quota to 15
+      for (let i = 1; i < 15; i++) {
+        store.recordExplainUsage(chatId);
+      }
+      assert.strictEqual(store.canExplain(chatId), false);
+
+      sentMessages.length = 0;
+      await dispatchCallback({
+        id: 'cb_explain_blocked',
+        data: 'CHOICE_EXPLAIN',
+        message: { chat: { id: chatId }, message_id: 106 },
+      });
+
+      const blockMsg = sentMessages.find((m) => m.text && m.text.includes('Limit Penjelasan kamu sudah habis!'));
+      assert.ok(blockMsg, 'Must block 16th explanation with upsell message');
+
       mockCompletionHandler = null;
+    });
+
+    test('6.8 Image upload checks image quota (limit 5) and blocks on 6th upload', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 6008;
+
+      for (let i = 0; i < 5; i++) {
+        store.recordImageUsage(chatId);
+      }
+      assert.strictEqual(store.canUploadImage(chatId), false);
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        photo: [{ file_id: 'fake_photo_1' }],
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes('Limit upload Gambar kamu sudah habis!'));
+    });
+
+    test('6.9 handleFollowUp checks explain quota and blocks when exhausted', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const chatId = 6009;
+
+      botModule.appendHistory(chatId, 'user', 'Materi awal');
+      botModule.appendHistory(chatId, 'assistant', 'Penjelasan awal');
+
+      for (let i = 0; i < 15; i++) {
+        store.recordExplainUsage(chatId);
+      }
+      assert.strictEqual(store.canExplain(chatId), false);
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: chatId },
+        text: 'Kenapa begitu?',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      assert.ok(sentMessages[0].text.includes('Limit Penjelasan kamu sudah habis!'));
     });
   });
 
@@ -1046,6 +1123,9 @@ function registerAllSuites() {
         used: 0,
         total: 5,
         remaining: 5,
+        quiz: { used: 0, total: 5, remaining: 5 },
+        explain: { used: 0, total: 15, remaining: 15 },
+        image: { used: 0, total: 5, remaining: 5 },
       });
 
       const partialUserId = 'user_quota_part_' + Date.now();
@@ -1058,6 +1138,9 @@ function registerAllSuites() {
         used: 2,
         total: 5,
         remaining: 3,
+        quiz: { used: 2, total: 5, remaining: 3 },
+        explain: { used: 0, total: 15, remaining: 15 },
+        image: { used: 0, total: 5, remaining: 5 },
       });
 
       const exhaustedUserId = 'user_quota_exh_' + Date.now();
@@ -1071,6 +1154,9 @@ function registerAllSuites() {
         used: 5,
         total: 5,
         remaining: 0,
+        quiz: { used: 5, total: 5, remaining: 0 },
+        explain: { used: 0, total: 15, remaining: 15 },
+        image: { used: 0, total: 5, remaining: 5 },
       });
 
       const premiumUserId = 'user_quota_prem_' + Date.now();
@@ -1082,6 +1168,9 @@ function registerAllSuites() {
       assert.strictEqual(quotaPrem.used, 1);
       assert.strictEqual(quotaPrem.total, 5);
       assert.strictEqual(quotaPrem.remaining, Infinity);
+      assert.strictEqual(quotaPrem.quiz.remaining, Infinity);
+      assert.strictEqual(quotaPrem.explain.remaining, Infinity);
+      assert.strictEqual(quotaPrem.image.remaining, Infinity);
     });
 
     test('7.2 bot.setMyCommands is called on register(bot) with start, quiz, reset, ceklimit, and iduser', () => {
@@ -1189,7 +1278,7 @@ function registerAllSuites() {
       const msg = sentMessages[0];
       assert.strictEqual(msg.chatId, chatId);
       assert.ok(
-        msg.text.includes('⭐ Premium (Unlimited Kuis)'),
+        msg.text.includes('⭐ Premium (Unlimited Kuis, Penjelasan, & Gambar)'),
         `Expected premium status label, got: ${msg.text}`
       );
       assert.ok(msg.text.includes('WIB'), `Expected WIB timezone indicator, got: ${msg.text}`);

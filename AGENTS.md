@@ -53,12 +53,20 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 - **Universal Primary Model:**
   - All workflows (quiz, explanation, hint) route to `deepseek-v4.1-flash:free` as the primary model.
   - Text-only prompts retain `mimo-v2.6-flash:free` as an automatic failover model.
-- **Token Budgeting & Timeouts:**
+- **Token Budgeting, Temperature & Timeouts:**
   - Default module timeout: `75s` (`75000ms`).
+  - Temperature: defaults to `0.2` (range 0.2 - 0.3) for deterministic, hallucination-free exam reasoning.
+  - Stop sequences: passes `stop: ["}\n\n", "}\n```"]` with safe fallback retry if unsupported by upstream provider.
   - Quiz generation: `max_tokens: 800`, timeout `30s` (light) / `45s` (heavy or image).
   - Explanations: `max_tokens: 2500` (light, timeout `75s`) / `3200` (heavy or image, timeout `90s`).
   - Hints: `max_tokens: 400`, timeout `30s` (text-only).
-- **JSON Parsing:** Always use `extractJson()` in `llm.js`. It strips fences, slices `{ ... }`, and automatically repairs trailing commas before parsing.
+- **JSON Parsing & Truncation Resilience:** Always use `extractJson()` in `llm.js`. It strips fences, slices `{ ... }`, repairs trailing commas, and auto-repairs truncated outputs cut off mid-sentence, with unclosed parentheses, quotes, or missing closing braces.
+- **Input Guard:** Caps user text material at 1500 characters (`userText.slice(0, 1500)`). Truncates quiz material to 1500 chars (`MAX_MATERIAL_CHARS = 1500`).
+- **Conceptual Tutor Prompt:** Explanations and quiz explanations must be solid and substantive (not too light or superficial). Explanations strictly follow the 3-bullet structure:
+  - 🎯 Konsep Inti (1-2 sentences)
+  - ⚙️ Cara Kerja / Rumus Kunci (bullet points, max 4 lines)
+  - 💡 Jebakan Ujian / Tips Cepat (1-2 sentences)
+  No introductory greetings or conversational filler.
 - **Prompt Guard:** Keep the prompt rule prohibiting models from calculating/deriving math solutions; models must only output the JSON schema.
 - **Languages:** All user-facing bot messages, buttons, and error notices must remain in casual Indonesian (*Bahasa Indonesia santai*). Developer logs and internal docs remain in English.
 
@@ -69,17 +77,18 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 - **Vision Failover Guard:** If an image is attached, failover to text-only Mimo is blocked and the error is re-thrown.
 - **Memory Hygiene:** In-memory `imageBase64` is nullified immediately after quiz or explanation generation completes to prevent memory leaks.
 
-## 8. Quiz Quota & Premium Tier (`store.js`)
-- **Daily Quota:** Free users are limited to 5 quizzes per day.
+## 8. Quota Limits & Premium Tier (`store.js`)
+- **Daily Quotas:** Free users are limited to:
+  - 5 quizzes per day (`DAILY_QUIZ_LIMIT = 5`).
+  - 15 conceptual explanations per day (`DAILY_EXPLAIN_LIMIT = 15`).
+  - 5 image uploads per day (`DAILY_IMAGE_LIMIT = 5`).
 - **Timezone & Reset:** Asia/Jakarta (00:00 WIB reset). Uses lazy reset comparing `user.lastQuizDate` with `YYYY-MM-DD` from `Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta' })`.
-- **Unlimited Features:**
-  - Active premium users (`user.premiumUntil > Date.now()`) have unlimited quiz attempts.
-  - Material explanation (`CHOICE_EXPLAIN`) is always unlimited for everyone.
-- **Quota Accounting:** Quota is only decremented (`recordQuizUsage`) after quiz generation and message delivery succeed.
+- **Unlimited Premium Tier:** Active premium users (`user.premiumUntil > Date.now()`) have unlimited quiz, explanation, and image attempts.
+- **Quota Accounting:** Quotas are only decremented (`recordQuizUsage`, `recordExplainUsage`, `recordImageUsage`) after generation and message delivery succeed.
 - **Persistence:** In-memory store atomically persists to `data/users.json` via temporary write (`data/users.json.tmp`) and `fs.renameSync`.
 - **User & Admin Commands:**
   - `/quiz [materi]`: Generates a multiple-choice quiz directly. Supports `/quiz <materi>` or `/quiz` without arguments (uses pre-existing material, uploaded image, or conversation history; prompts if empty).
-  - `/ceklimit`: Displays user quota status (remaining/total for free users, or active premium status with Jakarta expiry date).
+  - `/ceklimit`: Displays user quota status across quizzes, explanations, and image uploads (or active premium status with Jakarta expiry date).
   - `/iduser`: Sends caller's Telegram user ID (`msg.from.id`) to provide to the owner for manual upgrade.
   - `/upgrade <userId> <days>`: Restricted to `ADMIN_ID`. Extends active premium or starts fresh from `Date.now()`. Notifies the target user upon success.
   - `setMyCommands`: Registers Telegram menu shortcuts (`start`, `quiz`, `reset`, `ceklimit`, `iduser`) upon startup with graceful error handling.
@@ -90,4 +99,10 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 - **Multimodal Safety:** Raw Base64 data URLs are never stored in `history`; image inputs are replaced with placeholder `[Materi visual/gambar terlampir]`.
 - **Follow-up Routing:** Short user messages (<= 400 chars) sent while `history` is active are routed directly to `handleFollowUp()` without presenting `CHOICE_KEYBOARD`.
 - **Reset Triggers:** Memory is cleared upon `/reset`, `/start`, new image uploads, or text material exceeding 400 characters.
+
+## 10. Inactivity User Data Purge
+- **30-Minute Idle Purge:** If a user does not interact with the bot for 30 minutes (`IDLE_TTL_MS = 1800000`), in-memory session data (chat state, study material, image Base64 buffers, and conversation history) is completely deleted.
+- **Dual-Layer Enforcement:**
+  - Lazy check inside `getState(chatId)` resets expired sessions upon next message.
+  - Periodic background sweep via `cleanupIdleUsers()` runs every 5 minutes with unref'd timer.
 

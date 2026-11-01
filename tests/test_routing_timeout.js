@@ -32,6 +32,48 @@ process.env.AI_FALLBACK_MODEL_NAME = process.env.AI_FALLBACK_MODEL_NAME || 'mimo
 const assert = require('assert').strict;
 const { performance } = require('perf_hooks');
 const OpenAI = require('openai');
+const fs = require('fs');
+const path = require('path');
+const store = require('../store');
+
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const TMP_FILE = path.join(DATA_DIR, 'users.json.tmp');
+
+let originalUsersFileExisted = false;
+let originalUsersFileContent = null;
+
+if (fs.existsSync(USERS_FILE)) {
+  originalUsersFileExisted = true;
+  originalUsersFileContent = fs.readFileSync(USERS_FILE, 'utf8');
+}
+
+function restorePersistenceState() {
+  try {
+    if (fs.existsSync(TMP_FILE)) {
+      fs.unlinkSync(TMP_FILE);
+    }
+  } catch (_) {}
+
+  try {
+    if (originalUsersFileExisted && originalUsersFileContent !== null) {
+      fs.writeFileSync(USERS_FILE, originalUsersFileContent, 'utf8');
+    } else if (fs.existsSync(USERS_FILE)) {
+      fs.writeFileSync(USERS_FILE, '{}', 'utf8');
+    }
+  } catch (_) {}
+}
+
+process.on('exit', restorePersistenceState);
+process.on('SIGINT', () => {
+  restorePersistenceState();
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  restorePersistenceState();
+  console.error('Uncaught Exception during test execution:', err);
+  process.exit(1);
+});
 
 // Intercept OpenAI prototype to control completions in isolation
 const clientPrototype = (new OpenAI({ apiKey: 'dummy' })).chat.completions.constructor.prototype;
@@ -64,6 +106,8 @@ const {
   setState,
   appendHistory,
   clearHistory,
+  cleanupIdleUsers,
+  IDLE_TTL_MS,
   downloadTelegramImageAsBase64,
   sendSmart,
   splitIntoChunks,
@@ -932,6 +976,42 @@ function registerAllSuites() {
         console.warn = originalWarn;
       }
     });
+
+    test('4.10 Default temperature is 0.2 and respects custom temperature if passed', async () => {
+      let capturedTemp = null;
+      mockHandler = async (body) => {
+        capturedTemp = body.temperature;
+        return { choices: [{ message: { content: 'Hasil tes temperature' } }] };
+      };
+
+      await ask('Cek default temp', 'Sys');
+      assert.strictEqual(capturedTemp, 0.2, 'Default temperature must be 0.2');
+
+      await ask('Cek custom temp', 'Sys', { temperature: 0.3 });
+      assert.strictEqual(capturedTemp, 0.3, 'Custom temperature 0.3 must be respected');
+    });
+
+    test('4.11 body.stop receives stop tokens and retries safely if provider rejects stop parameter', async () => {
+      let firstCallStop = null;
+      let secondCallStop = null;
+      let callCount = 0;
+
+      mockHandler = async (body) => {
+        callCount++;
+        if (callCount === 1) {
+          firstCallStop = body.stop;
+          throw new Error('400 Bad Request: stop parameter is not supported by model');
+        }
+        secondCallStop = body.stop;
+        return { choices: [{ message: { content: 'Fallback without stop success' } }] };
+      };
+
+      const result = await ask('Tes stop fallback', 'Sys', { stop: ['}\n\n', '}\n```'] });
+      assert.strictEqual(result, 'Fallback without stop success');
+      assert.strictEqual(callCount, 2);
+      assert.deepStrictEqual(firstCallStop, ['}\n\n', '}\n```']);
+      assert.strictEqual(secondCallStop, undefined, 'Second call must omit stop parameter');
+    });
   });
 
   // ----------------------------------------------------
@@ -1028,6 +1108,36 @@ function registerAllSuites() {
           'Expected extractJson to throw on non-JSON input'
         );
       }
+    });
+
+    test('5.10 Auto-repairs truncated JSON cut off mid-string before closing parenthesis', () => {
+      const truncated =
+        '{\n' +
+        '  "question": "Apa itu gravitasi?",\n' +
+        '  "options": { "A": "Gaya tarik", "B": "Gaya tolak", "C": "Gaya gesek", "D": "Gaya magnet" },\n' +
+        '  "correct_answer": "A",\n' +
+        '  "explanation": "Gaya tarik menarik antar massa (contohnya apel jatuh';
+
+      const parsed = extractJson(truncated);
+      assert.ok(parsed);
+      assert.strictEqual(parsed.question, 'Apa itu gravitasi?');
+      assert.strictEqual(parsed.correct_answer, 'A');
+      assert.ok(parsed.explanation.includes('apel jatuh)'));
+    });
+
+    test('5.11 Auto-repairs truncated JSON cut off without closing braces', () => {
+      const truncated =
+        '{\n' +
+        '  "question": "Hukum I Newton?",\n' +
+        '  "options": { "A": "Inersia", "B": "Aksi Reaksi", "C": "F=ma", "D": "Gravitasi" },\n' +
+        '  "correct_answer": "A",\n' +
+        '  "explanation": "Benda mempertahankan keadaan diam atau bergerak lurus beraturan.';
+
+      const parsed = extractJson(truncated);
+      assert.ok(parsed);
+      assert.strictEqual(parsed.question, 'Hukum I Newton?');
+      assert.strictEqual(parsed.correct_answer, 'A');
+      assert.ok(parsed.explanation.includes('keadaan diam'));
     });
   });
 
@@ -1154,7 +1264,7 @@ function registerAllSuites() {
       );
     });
 
-    test('6.4 Overly long material (>3000 chars) is truncated before sending to model', async () => {
+    test('6.4 Overly long material (>1500 chars) is truncated before sending to model', async () => {
       let capturedPrompt = null;
       mockHandler = async (body) => {
         capturedPrompt = body.messages.find((m) => m.role === 'user').content;
@@ -1174,8 +1284,8 @@ function registerAllSuites() {
         };
       };
 
-      const massiveMaterial = 'Data historis penting peradaban kuno: '.repeat(200); // ~7600 chars
-      assert.ok(massiveMaterial.length > 3000);
+      const massiveMaterial = 'Data historis penting peradaban kuno: '.repeat(50); // ~1900 chars
+      assert.ok(massiveMaterial.length > 1500);
 
       await generateQuiz(massiveMaterial);
       assert.ok(capturedPrompt.includes('(...materi dipotong karena kepanjangan)'));
@@ -1785,10 +1895,75 @@ function registerAllSuites() {
         'Reset command description should explain its purpose'
       );
     });
+
+    // 8.9 User text > 1500 chars is sliced to exactly 1500 chars (cleanMaterial)
+    test('8.9 User text > 1500 chars is sliced to exactly 1500 chars', async () => {
+      const { handlers, sentMessages } = createMockBot();
+      const chatId = 8009;
+
+      setState(chatId, { state: 'IDLE', history: [] });
+
+      const massiveText = 'Materi biologi tentang pembelahan sel mitosis dan meiosis. '.repeat(40); // > 2300 chars
+      assert.ok(massiveText.length > 1500);
+
+      await handlers.message({
+        chat: { id: chatId },
+        text: massiveText,
+      });
+
+      const s = getState(chatId);
+      assert.strictEqual(s.material.length, 1500, 'Material must be capped to 1500 characters');
+      assert.strictEqual(s.material, massiveText.slice(0, 1500));
+    });
+
+    // 8.10 Inactive user data is purged after 30 minutes of idle time
+    test('8.10 Inactive user data is purged after 30 minutes of idle time', () => {
+      const activeChatId = 8010;
+      const idleChatId = 8011;
+
+      setState(activeChatId, {
+        state: 'QUIZ_DONE',
+        history: [{ role: 'user', content: 'Aktif baru saja' }],
+      });
+
+      setState(idleChatId, {
+        state: 'QUIZ_DONE',
+        history: [{ role: 'user', content: 'Sudah tidak aktif' }],
+        material: 'Materi lama',
+      });
+
+      // Simulate 35 minutes passing for the idle chat
+      const idleSession = getState(idleChatId);
+      idleSession.lastActivity = Date.now() - (35 * 60 * 1000);
+
+      // Verify cleanupIdleUsers purges the idle user
+      const purgedCount = cleanupIdleUsers();
+      assert.ok(purgedCount >= 1, 'cleanupIdleUsers must purge at least 1 idle user');
+
+      // Next interaction for idle user resets state to fresh IDLE with empty history
+      const freshSession = getState(idleChatId);
+      assert.strictEqual(freshSession.state, 'IDLE');
+      assert.strictEqual(freshSession.history.length, 0);
+
+      // Active user remains intact
+      const activeSession = getState(activeChatId);
+      assert.strictEqual(activeSession.history.length, 1);
+    });
   });
 }
 
 async function runAllTests() {
+  const testChatIds = [
+    2001, 2002, 2003, 2004, 3001, 3002, 3003, 3005, 3006, 3007,
+    8002, 8003, 8004, 80051, 80052, 8006, 8007, 8009, 8010, 8011
+  ];
+  for (const id of testChatIds) {
+    const u = store.getUser(id);
+    u.quizCount = 0;
+    u.explainCount = 0;
+    u.imageCount = 0;
+  }
+
   registerAllSuites();
 
   for (const s of registeredSuites) {
