@@ -1,4 +1,4 @@
-# AGENTS.md — Developer & Agent Guide for GampangBot
+# AGENTS.md: Developer & Agent Guide for GampangBot
 
 Compact operational guide for AI agents working in this repository.
 
@@ -24,7 +24,7 @@ store.js  --> Quota tracking & premium store, atomic persistence to data/users.j
 ## 3. Environment Variables (.env)
 Required keys in `.env` (never commit `.env`):
 - `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather.
-- `AI_BASE_URL`: OpenAI-compatible endpoint (e.g., `https://api.tokenharbor.com/v1`).
+- `AI_BASE_URL`: OpenAI-compatible endpoint (e.g., `https://tokenharbor.ai/v1`).
 - `AI_API_KEY`: API key for the AI provider.
 - `AI_MODEL_NAME`: Primary model ID (defaults to `deepseek-v4.1-flash:free` if unset).
 - `AI_FALLBACK_MODEL_NAME`: Automatic failover model (defaults to `mimo-v2.6-flash:free`).
@@ -69,6 +69,8 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 - **Quota Accounting:** Quota is only decremented (`recordQuizUsage`) after quiz generation and message delivery succeed.
 - **Persistence:** In-memory store atomically persists to `data/users.json` via temporary write (`data/users.json.tmp`) and `fs.renameSync`.
 - **User & Admin Commands:**
+  - `/ceklimit`: Displays user quota status (remaining/total for free users, or active premium status with Jakarta expiry date).
   - `/iduser`: Sends caller's Telegram user ID (`msg.from.id`) to provide to the owner for manual upgrade.
   - `/upgrade <userId> <days>`: Restricted to `ADMIN_ID`. Extends active premium or starts fresh from `Date.now()`. Notifies the target user upon success.
+  - `setMyCommands`: Registers Telegram menu shortcuts (`start`, `ceklimit`, `iduser`) upon startup with graceful error handling.
 

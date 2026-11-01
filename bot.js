@@ -1,6 +1,6 @@
 const { ask, extractJson, MODEL_DEEPSEEK, MODEL_MIMO } = require('./llm');
 const { latexToUnicode } = require('./math');
-const { canTakeQuiz, recordQuizUsage, upgradeUser } = require('./store');
+const { canTakeQuiz, recordQuizUsage, upgradeUser, getUserQuota } = require('./store');
 const {
   EXPLAIN_SYSTEM_PROMPT,
   HINT_SYSTEM_PROMPT,
@@ -67,6 +67,17 @@ async function sendSmart(bot, chatId, text, opts = {}) {
 }
 
 function register(bot) {
+  const BOT_COMMANDS = [
+    { command: 'start', description: 'Mulai bot & panduan belajar' },
+    { command: 'ceklimit', description: 'Cek sisa limit kuis harian' },
+    { command: 'iduser', description: 'Lihat ID Telegram untuk upgrade' },
+  ];
+  if (typeof bot.setMyCommands === 'function') {
+    bot.setMyCommands(BOT_COMMANDS).catch((err) => {
+      console.error('Failed to set Telegram commands menu:', err.message);
+    });
+  }
+
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
     setState(chatId, { state: 'IDLE', quiz: null, messageId: null });
@@ -79,6 +90,49 @@ function register(bot) {
         '🧠 Jelasin materi pake gaya anak SD (santai & gampang)\n\n' +
         'Gaskeun, kirim materinya! 🚀',
       { parse_mode: 'Markdown' }
+    );
+  });
+
+  bot.onText(/\/ceklimit/, async (msg) => {
+    const userId = msg.from ? msg.from.id : msg.chat.id;
+    const quota = getUserQuota(userId);
+
+    if (quota.isPremium) {
+      const expiryDate = new Date(quota.premiumUntil).toLocaleString('id-ID', {
+        timeZone: 'Asia/Jakarta',
+      });
+      await sendSmart(
+        bot,
+        msg.chat.id,
+        `📊 *Status Limit Kamu*\n\n` +
+        `Status: ⭐ Premium (Unlimited Kuis)\n` +
+        `Aktif sampai: ${expiryDate} WIB\n\n` +
+        `Gaskeun latihan sepuasnya tanpa batas harian! 🚀`
+      );
+      return;
+    }
+
+    if (quota.remaining === 0) {
+      await sendSmart(
+        bot,
+        msg.chat.id,
+        `📊 *Status Limit Kamu*\n\n` +
+        `Status: Free\n` +
+        `Sisa Kuis Hari Ini: 0/${quota.total} (Habis)\n` +
+        `Reset setiap 00:00 WIB\n\n` +
+        `Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx`
+      );
+      return;
+    }
+
+    await sendSmart(
+      bot,
+      msg.chat.id,
+      `📊 *Status Limit Kamu*\n\n` +
+      `Status: Free\n` +
+      `Sisa Kuis Hari Ini: ${quota.remaining}/${quota.total}\n` +
+      `Reset setiap 00:00 WIB\n\n` +
+      `Kirim catatan atau materi kamu ke sini buat mulai kuis! 🚀`
     );
   });
 
@@ -225,7 +279,7 @@ function register(bot) {
         await bot.answerCallbackQuery(query.id);
 
         if (s.state !== 'AWAITING_ANSWER' || !s.quiz) {
-          // Late/duplicate click — quiz already answered
+          // Late or duplicate click: quiz already answered
           bot.sendMessage(chatId, 'Kuisnya udah kejawab tuh, kirim materi baru yuk! 🔁');
           return;
         }

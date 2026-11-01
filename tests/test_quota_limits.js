@@ -116,6 +116,7 @@ function createMockBot() {
   const answeredCallbacks = [];
   const editedMarkups = [];
   const chatActions = [];
+  const commandsCalls = [];
 
   let sendMessageInterceptor = null;
 
@@ -125,6 +126,10 @@ function createMockBot() {
     },
     on: (event, cb) => {
       eventHandlers[event] = cb;
+    },
+    setMyCommands: async (commands) => {
+      commandsCalls.push(commands);
+      return true;
     },
     sendMessage: async (chatId, text, opts = {}) => {
       if (sendMessageInterceptor) {
@@ -175,6 +180,7 @@ function createMockBot() {
 
   return {
     mockBot,
+    commandsCalls,
     dispatchMessage,
     dispatchCallback,
     setSendMessageInterceptor,
@@ -227,7 +233,7 @@ function withMockTime(isoStringOrTimestamp, fn) {
 }
 
 function registerAllSuites() {
-  suite('1. store.js — Free User Quota & Daily Limit Logic', () => {
+  suite('1. store.js: Free User Quota & Daily Limit Logic', () => {
     test('1.1 New free user initializes with quizCount = 0 and premiumUntil = 0', () => {
       const userId = 'user_init_' + Date.now();
       const user = store.getUser(userId);
@@ -307,7 +313,7 @@ function registerAllSuites() {
     });
   });
 
-  suite('2. store.js — Lazy Reset on 00:00 WIB', () => {
+  suite('2. store.js: Lazy Reset on 00:00 WIB', () => {
     test('2.1 Quota resets to 0 when lastQuizDate is from yesterday / past date', () => {
       const userId = 'user_stale_' + Date.now();
       const user = store.getUser(userId);
@@ -388,7 +394,7 @@ function registerAllSuites() {
     });
   });
 
-  suite('3. store.js — Premium Upgrade & Accumulation', () => {
+  suite('3. store.js: Premium Upgrade & Accumulation', () => {
     test('3.1 upgradeUser(userId, days) sets premiumUntil to Date.now() + days * 86400000', () => {
       const userId = 'user_prem_fresh_' + Date.now();
       const beforeTime = Date.now();
@@ -494,7 +500,7 @@ function registerAllSuites() {
     });
   });
 
-  suite('4. store.js — Atomic File Persistence & Store Reload', () => {
+  suite('4. store.js: Atomic File Persistence & Store Reload', () => {
     test('4.1 recordQuizUsage and upgradeUser persist data to data/users.json atomically', () => {
       const userId = 'user_persist_atomic_' + Date.now();
       store.upgradeUser(userId, 14);
@@ -562,7 +568,7 @@ function registerAllSuites() {
     });
   });
 
-  suite('5. bot.js — /iduser & /upgrade Commands', () => {
+  suite('5. bot.js: /iduser & /upgrade Commands', () => {
     test('5.1 /iduser outputs sender user ID formatted in monospace backticks (`<userId>`)', async () => {
       const { dispatchMessage, sentMessages } = createMockBot();
       const callerId = 78912345;
@@ -804,7 +810,7 @@ function registerAllSuites() {
     });
   });
 
-  suite('6. bot.js — Quota Gating, Delivery Accounting, & Unlimited Features', () => {
+  suite('6. bot.js: Quota Gating, Delivery Accounting, & Unlimited Features', () => {
     const EXACT_QUOTA_EXHAUSTED_MSG =
       'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx';
 
@@ -1024,6 +1030,167 @@ function registerAllSuites() {
       assert.ok(explainMsg, 'Explanation should be delivered successfully');
 
       mockCompletionHandler = null;
+    });
+  });
+
+  suite('Suite 7: store.js & bot.js: /ceklimit & setMyCommands', () => {
+    const EXACT_QUOTA_EXHAUSTED_MSG =
+      'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx';
+
+    test('7.1 getUserQuota returns expected shape for new, partial, exhausted, and premium users', () => {
+      const newUserId = 'user_quota_new_' + Date.now();
+      const quotaNew = store.getUserQuota(newUserId);
+      assert.deepStrictEqual(quotaNew, {
+        isPremium: false,
+        premiumUntil: 0,
+        used: 0,
+        total: 5,
+        remaining: 5,
+      });
+
+      const partialUserId = 'user_quota_part_' + Date.now();
+      store.recordQuizUsage(partialUserId);
+      store.recordQuizUsage(partialUserId);
+      const quotaPart = store.getUserQuota(partialUserId);
+      assert.deepStrictEqual(quotaPart, {
+        isPremium: false,
+        premiumUntil: 0,
+        used: 2,
+        total: 5,
+        remaining: 3,
+      });
+
+      const exhaustedUserId = 'user_quota_exh_' + Date.now();
+      for (let i = 0; i < 5; i++) {
+        store.recordQuizUsage(exhaustedUserId);
+      }
+      const quotaExh = store.getUserQuota(exhaustedUserId);
+      assert.deepStrictEqual(quotaExh, {
+        isPremium: false,
+        premiumUntil: 0,
+        used: 5,
+        total: 5,
+        remaining: 0,
+      });
+
+      const premiumUserId = 'user_quota_prem_' + Date.now();
+      store.upgradeUser(premiumUserId, 7);
+      store.recordQuizUsage(premiumUserId);
+      const quotaPrem = store.getUserQuota(premiumUserId);
+      assert.strictEqual(quotaPrem.isPremium, true);
+      assert.ok(quotaPrem.premiumUntil > Date.now());
+      assert.strictEqual(quotaPrem.used, 1);
+      assert.strictEqual(quotaPrem.total, 5);
+      assert.strictEqual(quotaPrem.remaining, Infinity);
+    });
+
+    test('7.2 bot.setMyCommands is called on register(bot) with start, ceklimit, and iduser', () => {
+      const { commandsCalls } = createMockBot();
+      assert.strictEqual(commandsCalls.length, 1);
+      assert.deepStrictEqual(
+        commandsCalls[0],
+        [
+          { command: 'start', description: 'Mulai bot & panduan belajar' },
+          { command: 'ceklimit', description: 'Cek sisa limit kuis harian' },
+          { command: 'iduser', description: 'Lihat ID Telegram untuk upgrade' },
+        ]
+      );
+    });
+
+    test('7.3 bot.setMyCommands handles rejection and omission safely without throwing', async () => {
+      const botWithoutSetCommands = {
+        onText: () => {},
+        on: () => {},
+      };
+      assert.doesNotThrow(() => {
+        botModule.register(botWithoutSetCommands);
+      });
+
+      const originalConsoleError = console.error;
+      console.error = () => {};
+      try {
+        const botWithRejectingSetCommands = {
+          setMyCommands: () => Promise.reject(new Error('Telegram API connection timeout')),
+          onText: () => {},
+          on: () => {},
+        };
+        assert.doesNotThrow(() => {
+          botModule.register(botWithRejectingSetCommands);
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      } finally {
+        console.error = originalConsoleError;
+      }
+    });
+
+    test('7.4 /ceklimit handler for free user with remaining quota displays count and reset time', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const freeUserId = 7101;
+      const chatId = 7101;
+
+      store.recordQuizUsage(freeUserId);
+      store.recordQuizUsage(freeUserId);
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: freeUserId },
+        text: '/ceklimit',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      const msg = sentMessages[0];
+      assert.strictEqual(msg.chatId, chatId);
+      assert.ok(msg.text.includes('3/5'), `Expected remaining count 3/5, got: ${msg.text}`);
+      assert.ok(msg.text.includes('Reset setiap 00:00 WIB'), `Expected reset notice, got: ${msg.text}`);
+      assert.ok(msg.text.includes('Status: Free'), `Expected Status: Free, got: ${msg.text}`);
+    });
+
+    test('7.5 /ceklimit handler for exhausted free user displays 0/5 (Habis) and upsell notice', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const exhaustedUserId = 7102;
+      const chatId = 7102;
+
+      for (let i = 0; i < 5; i++) {
+        store.recordQuizUsage(exhaustedUserId);
+      }
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: exhaustedUserId },
+        text: '/ceklimit',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      const msg = sentMessages[0];
+      assert.strictEqual(msg.chatId, chatId);
+      assert.ok(msg.text.includes('0/5 (Habis)'), `Expected 0/5 (Habis), got: ${msg.text}`);
+      assert.ok(
+        msg.text.includes(EXACT_QUOTA_EXHAUSTED_MSG),
+        `Expected exact upsell message, got: ${msg.text}`
+      );
+    });
+
+    test('7.6 /ceklimit handler for active premium user displays premium status and Jakarta expiry', async () => {
+      const { dispatchMessage, sentMessages } = createMockBot();
+      const premiumUserId = 7103;
+      const chatId = 7103;
+
+      store.upgradeUser(premiumUserId, 7);
+
+      await dispatchMessage({
+        chat: { id: chatId },
+        from: { id: premiumUserId },
+        text: '/ceklimit',
+      });
+
+      assert.strictEqual(sentMessages.length, 1);
+      const msg = sentMessages[0];
+      assert.strictEqual(msg.chatId, chatId);
+      assert.ok(
+        msg.text.includes('⭐ Premium (Unlimited Kuis)'),
+        `Expected premium status label, got: ${msg.text}`
+      );
+      assert.ok(msg.text.includes('WIB'), `Expected WIB timezone indicator, got: ${msg.text}`);
     });
   });
 }

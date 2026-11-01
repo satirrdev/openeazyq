@@ -86,6 +86,19 @@ function upgradeUser(userId, days) {
   return user;
 }
 
+function getUserQuota(userId) {
+  const user = getUser(userId);
+  const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
+  const remaining = isPremium ? Infinity : Math.max(0, DAILY_QUIZ_LIMIT - user.quizCount);
+  return {
+    isPremium,
+    premiumUntil: user.premiumUntil,
+    used: user.quizCount,
+    total: DAILY_QUIZ_LIMIT,
+    remaining,
+  };
+}
+
 module.exports = {
   DAILY_QUIZ_LIMIT,
   getTodayWIB,
@@ -93,4 +106,5 @@ module.exports = {
   canTakeQuiz,
   recordQuizUsage,
   upgradeUser,
+  getUserQuota,
 };
