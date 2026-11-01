@@ -66,6 +66,25 @@ async function sendSmart(bot, chatId, text, opts = {}) {
   }
 }
 
+// Download Telegram photo or document file and convert to Base64 data URL
+async function downloadTelegramImageAsBase64(bot, fileId, defaultMime = 'image/jpeg') {
+  const fileLink = await bot.getFileLink(fileId);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(fileLink, { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`Failed to download Telegram file (${res.status})`);
+    }
+    const contentType = res.headers.get('content-type') || defaultMime;
+    const arrayBuffer = await res.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString('base64');
+    return `data:${contentType};base64,${base64Data}`;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function register(bot) {
   const BOT_COMMANDS = [
     { command: 'start', description: 'Mulai bot & panduan belajar' },
@@ -80,11 +99,11 @@ function register(bot) {
 
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
-    setState(chatId, { state: 'IDLE', quiz: null, messageId: null });
+    setState(chatId, { state: 'IDLE', quiz: null, messageId: null, imageBase64: null });
     bot.sendMessage(
       chatId,
       'Hai! 👋 Gw *GampangBot*, asisten belajar kompetitiflu.\n\n' +
-        'Kirim aja materi belajar, catatan, atau syllabus dong ke sini.\n' +
+        'Kirim aja materi belajar, catatan, gambar/foto materi, atau syllabus ke sini.\n' +
         'Nanti gw bisa:\n' +
         '📚 Bikinin kuis pilihan ganda\n' +
         '🧠 Jelasin materi pake gaya anak SD (santai & gampang)\n\n' +
@@ -185,12 +204,20 @@ function register(bot) {
     }
   });
 
-  bot.on('message', (msg) => {
-    // Ignore commands (/start etc.) and photo/media pairs without text
-    if (!msg.text || msg.text.startsWith('/')) return;
+  bot.on('message', async (msg) => {
+    if (msg.text && msg.text.startsWith('/')) return;
 
     const chatId = msg.chat.id;
     const s = getState(chatId);
+
+    const isPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
+    const isImageDoc =
+      msg.document &&
+      typeof msg.document.mime_type === 'string' &&
+      msg.document.mime_type.startsWith('image/');
+    const isImage = isPhoto || isImageDoc;
+
+    if (!msg.text && !isImage) return;
 
     // Check if an AI action is already actively computing for this user
     if (s.state === 'QUIZ_ACTIVE' || s.state === 'EXPLAIN_ACTIVE') {
@@ -200,16 +227,48 @@ function register(bot) {
 
     // Quiz is locked while waiting for an answer: never change the question
     if (s.state === 'AWAITING_ANSWER' && s.quiz) {
+      if (isImage) {
+        bot.sendMessage(chatId, 'Nope, soalnya udah dikunci 🔒 Selesaikan dulu kuis yang lagi aktif ya!');
+        return;
+      }
       handleHint(chatId, msg.text);
       return;
     }
 
-    // If user sends new material while awaiting answer, reset to fresh material
+    if (isImage) {
+      try {
+        const fileId = isPhoto ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
+        const mimeType = isImageDoc ? msg.document.mime_type : 'image/jpeg';
+        const imageBase64 = await downloadTelegramImageAsBase64(bot, fileId, mimeType);
+        const caption = typeof msg.caption === 'string' ? msg.caption.trim() : '';
+
+        setState(chatId, {
+          state: 'IDLE',
+          quiz: null,
+          messageId: null,
+          material: caption,
+          imageBase64,
+        });
+
+        bot.sendMessage(
+          chatId,
+          'Oke, dapet gambarnya! 📸\nMau gw apain nih?',
+          { reply_markup: CHOICE_KEYBOARD }
+        );
+      } catch (err) {
+        console.error('Failed to process incoming image:', err.message);
+        bot.sendMessage(chatId, 'Waduh, gagal download gambarnya. Boleh coba kirim ulang? 🙏');
+      }
+      return;
+    }
+
+    // Regular text material
     setState(chatId, {
       state: 'IDLE',
       quiz: null,
       messageId: null,
       material: msg.text,
+      imageBase64: null,
     });
 
     bot.sendMessage(
@@ -247,7 +306,8 @@ function register(bot) {
 
         await bot.answerCallbackQuery(query.id);
         const material = s.material;
-        if (!material) {
+        const imageBase64 = s.imageBase64;
+        if (!material && !imageBase64) {
           bot.sendMessage(chatId, 'Materinya belum ada nih, kirim dulu dong 🙏');
           return;
         }
@@ -257,9 +317,9 @@ function register(bot) {
           message_id: query.message.message_id,
         }).catch(() => {});
 
-        setState(chatId, { material, choice: data });
+        setState(chatId, { choice: data });
 
-        // Show typing while the AI works (reasoning model can take ~1 min)
+        // Show typing while the AI works
         const typing = setInterval(() => {
           bot.sendChatAction(chatId, 'typing').catch(() => {});
         }, 4000);
@@ -268,7 +328,7 @@ function register(bot) {
         if (data === 'CHOICE_QUIZ') {
           handleQuiz(chatId).finally(stopTyping);
         } else {
-          handleExplain(chatId, material).finally(stopTyping);
+          handleExplain(chatId, material, imageBase64).finally(stopTyping);
         }
         return;
       }
@@ -337,8 +397,8 @@ function register(bot) {
         `Pertanyaan kuis yang DIKUNCI (JANGAN diubah):\n${quiz.question}\n\nPilihan:\n${optionsText}\n\n` +
         `Pesan user: "${userMessage}"`;
       const reply = await ask(prompt, HINT_SYSTEM_PROMPT, {
-        primaryModel: MODEL_MIMO,
-        fallbackModel: MODEL_DEEPSEEK,
+        primaryModel: MODEL_DEEPSEEK,
+        fallbackModel: MODEL_MIMO,
         maxTokens: 250,
         timeoutMs: 30000,
       });
@@ -357,46 +417,60 @@ function register(bot) {
     bot.sendMessage(chatId, 'Oke, lagi gw bikinin soal nih... ⏳');
 
     try {
-      const quiz = await generateQuiz(s.material);
+      const quiz = await generateQuiz(s.material, s.imageBase64);
       const sent = await sendSmart(bot, chatId, buildQuestionText(quiz), {
         reply_markup: buildQuizKeyboard(),
       });
       recordQuizUsage(chatId);
-      setState(chatId, { state: 'AWAITING_ANSWER', quiz, messageId: sent.message_id });
+      setState(chatId, {
+        state: 'AWAITING_ANSWER',
+        quiz,
+        messageId: sent.message_id,
+        imageBase64: null,
+      });
     } catch (e) {
       console.error('Quiz generation error:', e);
-      setState(chatId, { state: 'IDLE', quiz: null });
+      setState(chatId, { state: 'IDLE', quiz: null, imageBase64: null });
       bot.sendMessage(chatId, AI_BUSY_MSG);
     }
   }
 
-  async function handleExplain(chatId, material) {
+  async function handleExplain(chatId, material, imageBase64 = null) {
     setState(chatId, { state: 'EXPLAIN_ACTIVE' });
     bot.sendMessage(chatId, 'Oke, lagi gw jelasin materinya nih... ⏳');
 
     try {
       const MAX_CHARS = 3000;
-      const trimmed = material.slice(0, MAX_CHARS);
-      const complexity = classifyComplexity(material);
-      const isHeavy = complexity === 'heavy';
-      const primaryModel = isHeavy ? MODEL_DEEPSEEK : MODEL_MIMO;
-      const fallbackModel = isHeavy ? MODEL_MIMO : MODEL_DEEPSEEK;
+      const trimmed = (material || '').slice(0, MAX_CHARS);
+      const complexity = classifyComplexity(trimmed);
+      const isHeavy = Boolean(imageBase64) || complexity === 'heavy';
+      const primaryModel = MODEL_DEEPSEEK;
+      const fallbackModel = imageBase64 ? null : MODEL_MIMO;
       const maxTokens = isHeavy ? 1000 : 750;
       const timeoutMs = isHeavy ? 60000 : 45000;
 
+      const prompt = imageBase64 && (!trimmed || !trimmed.trim())
+        ? 'Jelaskan materi yang ada pada gambar berikut secara bertahap dan mudah dipahami.'
+        : `Materi dari user:\n\n${trimmed}`;
+
       const explanation = await ask(
-        `Materi dari user:\n\n${trimmed}`,
+        prompt,
         EXPLAIN_SYSTEM_PROMPT,
-        { primaryModel, fallbackModel, maxTokens, timeoutMs }
+        { primaryModel, fallbackModel, maxTokens, timeoutMs, imageBase64 }
       );
       sendSmart(bot, chatId, cleanMarkdown(explanation));
-      setState(chatId, { state: 'IDLE' });
+      setState(chatId, { state: 'IDLE', imageBase64: null });
     } catch (e) {
       console.error('Explain error:', e);
-      setState(chatId, { state: 'IDLE' });
+      setState(chatId, { state: 'IDLE', imageBase64: null });
       bot.sendMessage(chatId, AI_BUSY_MSG);
     }
   }
 }
 
-module.exports = { register, getState, setState };
+module.exports = {
+  register,
+  getState,
+  setState,
+  downloadTelegramImageAsBase64,
+};

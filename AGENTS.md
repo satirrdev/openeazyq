@@ -49,18 +49,25 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 ## 6. LLM Integration & Robustness Rules
 - **Client Configuration:**
   - `maxRetries: 0` on the OpenAI client instance to eliminate invisible SDK retry explosions and enforce predictable failover deadlines.
-- **Dynamic Model Routing:**
-  - Light prompts (short text, non-STEM concepts, hints) -> primary: Mimo v2.6 (`mimo-v2.6-flash:free`), fallback: DeepSeek (`deepseek-v4.1-flash:free`).
-  - Heavy prompts (long text >500 chars, complex STEM / formulas / code) -> primary: DeepSeek (`deepseek-v4.1-flash:free`), fallback: Mimo v2.6 (`mimo-v2.6-flash:free`).
+- **Universal Primary Model:**
+  - All workflows (quiz, explanation, hint) route to `deepseek-v4.1-flash:free` as the primary model.
+  - Text-only prompts retain `mimo-v2.6-flash:free` as an automatic failover model.
 - **Token Budgeting & Timeouts:**
-  - Quiz generation: `max_tokens: 450`, timeout `30s` (light) / `45s` (heavy).
-  - Explanations: `max_tokens: 750` (light, timeout `45s`) / `1000` (heavy, timeout `60s`).
-  - Hints: `max_tokens: 250`, timeout `30s`.
+  - Quiz generation: `max_tokens: 450`, timeout `30s` (light) / `45s` (heavy or image).
+  - Explanations: `max_tokens: 750` (light, timeout `45s`) / `1000` (heavy or image, timeout `60s`).
+  - Hints: `max_tokens: 250`, timeout `30s` (text-only).
 - **JSON Parsing:** Always use `extractJson()` in `llm.js`. It strips fences, slices `{ ... }`, and automatically repairs trailing commas before parsing.
 - **Prompt Guard:** Keep the prompt rule prohibiting models from calculating/deriving math solutions; models must only output the JSON schema.
 - **Languages:** All user-facing bot messages, buttons, and error notices must remain in casual Indonesian (*Bahasa Indonesia santai*). Developer logs and internal docs remain in English.
 
-## 7. Quiz Quota & Premium Tier (`store.js`)
+## 7. Multimodal Image Support
+- **Supported Formats:** Telegram photos (`msg.photo`, selecting highest resolution) and image documents (`msg.document` with `image/*` MIME type).
+- **Downloader:** `downloadTelegramImageAsBase64` downloads files via `bot.getFileLink` using native fetch and converts to Base64 data URLs.
+- **Vision Payload:** Formats user content with OpenAI-compatible `image_url` blocks for DeepSeek v4.1-flash.
+- **Vision Failover Guard:** If an image is attached, failover to text-only Mimo is blocked and the error is re-thrown.
+- **Memory Hygiene:** In-memory `imageBase64` is nullified immediately after quiz or explanation generation completes to prevent memory leaks.
+
+## 8. Quiz Quota & Premium Tier (`store.js`)
 - **Daily Quota:** Free users are limited to 5 quizzes per day.
 - **Timezone & Reset:** Asia/Jakarta (00:00 WIB reset). Uses lazy reset comparing `user.lastQuizDate` with `YYYY-MM-DD` from `Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta' })`.
 - **Unlimited Features:**

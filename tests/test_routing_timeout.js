@@ -59,6 +59,7 @@ const {
   register: registerBot,
   getState,
   setState,
+  downloadTelegramImageAsBase64,
 } = require('../bot');
 
 // Test framework state
@@ -113,6 +114,8 @@ function createMockBot() {
       editedMarkups.push({ replyMarkup, opts });
       return true;
     },
+    getFileLink: async (fileId) => `https://api.telegram.org/file/bot-mock/${fileId}`,
+    setMyCommands: async () => true,
   };
 
   registerBot(mockBot);
@@ -353,8 +356,8 @@ function registerAllSuites() {
   // SUITE 3: Dynamic Model Routing in quiz.js and bot.js
   // ----------------------------------------------------
   suite('3. Dynamic Model Routing in quiz.js and bot.js', () => {
-    // 3.1 Light material in quiz.js
-    test('3.1 quiz.js: Light material routes to Mimo v2.6 (primary) with 30s timeout & 450 tokens', async () => {
+    // 3.1 Light material in quiz.js routes to DeepSeek
+    test('3.1 quiz.js: Light material routes to DeepSeek (primary) with 30s timeout & 450 tokens', async () => {
       let capturedBody = null;
       let capturedOpts = null;
 
@@ -381,12 +384,12 @@ function registerAllSuites() {
       const quiz = await generateQuiz(lightMaterial);
 
       assert.ok(quiz);
-      assert.strictEqual(capturedBody.model, MODEL_MIMO, `Primary model for light question must be Mimo (${MODEL_MIMO})`);
+      assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, `Primary model for light question must be DeepSeek (${MODEL_DEEPSEEK})`);
       assert.strictEqual(capturedOpts.timeout, 30000, 'Light question timeout must be 30,000ms');
       assert.strictEqual(capturedBody.max_tokens, 450, 'Max tokens must be 450 for quiz generation');
     });
 
-    // 3.2 Heavy material in quiz.js
+    // 3.2 Heavy material in quiz.js routes to DeepSeek
     test('3.2 quiz.js: Heavy material (math / STEM) routes to DeepSeek (primary) with 45s timeout & 450 tokens', async () => {
       let capturedBody = null;
       let capturedOpts = null;
@@ -447,8 +450,8 @@ function registerAllSuites() {
       assert.strictEqual(capturedModel, MODEL_DEEPSEEK, 'Material > 500 characters must route to DeepSeek as primary');
     });
 
-    // 3.4 bot.js: handleExplain with light material routes to Mimo v2.6, 750 tokens, 45s timeout
-    test('3.4 bot.js: handleExplain with light material routes to Mimo v2.6 (primary) with 750 tokens & 45s timeout', async () => {
+    // 3.4 bot.js: handleExplain with light material routes to DeepSeek, 750 tokens, 45s timeout
+    test('3.4 bot.js: handleExplain with light material routes to DeepSeek (primary) with 750 tokens & 45s timeout', async () => {
       const { handlers } = createMockBot();
       const chatId = 2001;
 
@@ -466,13 +469,13 @@ function registerAllSuites() {
         };
       };
 
-      // 1. User sends light material
+      // User sends light material
       handlers.message({
         chat: { id: chatId },
         text: 'Fotosintesis adalah proses pembentukan makanan pada tumbuhan hijau.',
       });
 
-      // 2. User clicks 'CHOICE_EXPLAIN'
+      // User clicks 'CHOICE_EXPLAIN'
       await handlers.callback_query({
         id: 'cb_explain_light',
         message: { chat: { id: chatId }, message_id: 50 },
@@ -483,7 +486,7 @@ function registerAllSuites() {
       await new Promise((r) => setTimeout(r, 20));
 
       assert.ok(capturedBody, 'LLM call should have been triggered');
-      assert.strictEqual(capturedBody.model, MODEL_MIMO, 'Light explanation must use Mimo as primary');
+      assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Light explanation must use DeepSeek as primary');
       assert.strictEqual(capturedBody.max_tokens, 750, 'Light explanation max_tokens must be 750');
       assert.strictEqual(capturedOpts.timeout, 45000, 'Light explanation timeout must be 45,000ms');
     });
@@ -507,13 +510,13 @@ function registerAllSuites() {
         };
       };
 
-      // 1. User sends heavy STEM material
+      // User sends heavy STEM material
       handlers.message({
         chat: { id: chatId },
         text: 'Rumus turunan diferensial kalkulus: d/dx (x^n) = n*x^(n-1). Tentukan integral \\int x dx.',
       });
 
-      // 2. User clicks 'CHOICE_EXPLAIN'
+      // User clicks 'CHOICE_EXPLAIN'
       await handlers.callback_query({
         id: 'cb_explain_heavy',
         message: { chat: { id: chatId }, message_id: 51 },
@@ -529,8 +532,8 @@ function registerAllSuites() {
       assert.strictEqual(capturedOpts.timeout, 60000, 'Heavy explanation timeout must be 60,000ms');
     });
 
-    // 3.6 bot.js: handleHint routes to Mimo v2.6, 250 tokens, 30s timeout
-    test('3.6 bot.js: handleHint routes to Mimo v2.6 (primary) with 250 tokens & 30s timeout', async () => {
+    // 3.6 bot.js: handleHint routes to DeepSeek, 250 tokens, 30s timeout
+    test('3.6 bot.js: handleHint routes to DeepSeek (primary) with 250 tokens & 30s timeout', async () => {
       const { handlers } = createMockBot();
       const chatId = 2003;
 
@@ -570,9 +573,95 @@ function registerAllSuites() {
       await new Promise((r) => setTimeout(r, 20));
 
       assert.ok(capturedBody, 'Hint LLM call should have been triggered');
-      assert.strictEqual(capturedBody.model, MODEL_MIMO, 'Hint must use Mimo as primary');
+      assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Hint must use DeepSeek as primary');
       assert.strictEqual(capturedBody.max_tokens, 250, 'Hint max_tokens must be 250');
       assert.strictEqual(capturedOpts.timeout, 30000, 'Hint timeout must be 30,000ms');
+    });
+
+    // 3.7 quiz.js: Multimodal quiz with imageBase64 routes to DeepSeek with vision payload
+    test('3.7 quiz.js: Multimodal quiz with imageBase64 routes to DeepSeek (primary) with vision payload & 45s timeout', async () => {
+      let capturedBody = null;
+      let capturedOpts = null;
+
+      mockHandler = async (body, opts) => {
+        capturedBody = body;
+        capturedOpts = opts;
+        return {
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  question: 'Berapa luas segitiga pada gambar?',
+                  options: { A: '10 cm²', B: '20 cm²', C: '30 cm²', D: '40 cm²' },
+                  correct_answer: 'A',
+                  explanation: 'Luas segitiga adalah 1/2 kali alas kali tinggi.',
+                }),
+              },
+            },
+          ],
+        };
+      };
+
+      const fakeImageBase64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const quiz = await generateQuiz('Soal geometri segitiga', fakeImageBase64);
+
+      assert.ok(quiz);
+      assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Multimodal quiz must use DeepSeek as primary');
+      assert.strictEqual(capturedOpts.timeout, 45000, 'Multimodal quiz timeout must be 45,000ms');
+      assert.strictEqual(capturedBody.max_tokens, 450, 'Max tokens must be 450');
+
+      const userMsg = capturedBody.messages.find((m) => m.role === 'user');
+      assert.ok(Array.isArray(userMsg.content), 'User message content must be an array for multimodal input');
+      assert.strictEqual(userMsg.content.length, 2);
+      assert.strictEqual(userMsg.content[0].type, 'text');
+      assert.strictEqual(userMsg.content[1].type, 'image_url');
+      assert.strictEqual(userMsg.content[1].image_url.url, fakeImageBase64);
+    });
+
+    // 3.8 bot.js: Multimodal handleExplain with imageBase64 routes to DeepSeek with vision payload
+    test('3.8 bot.js: Multimodal handleExplain with imageBase64 routes to DeepSeek with vision payload & 60s timeout', async () => {
+      const { handlers } = createMockBot();
+      const chatId = 2004;
+
+      let capturedBody = null;
+      let capturedOpts = null;
+      let resolveCall;
+      const callPromise = new Promise((resolve) => { resolveCall = resolve; });
+
+      mockHandler = async (body, opts) => {
+        capturedBody = body;
+        capturedOpts = opts;
+        resolveCall();
+        return {
+          choices: [{ message: { content: 'Penjelasan diagram siklus krebs pada gambar.' } }],
+        };
+      };
+
+      const fakeImageBase64 = 'data:image/jpeg;base64,1234567890';
+      setState(chatId, {
+        state: 'IDLE',
+        material: 'Diagram respirasi sel',
+        imageBase64: fakeImageBase64,
+      });
+
+      await handlers.callback_query({
+        id: 'cb_explain_image',
+        message: { chat: { id: chatId }, message_id: 52 },
+        data: 'CHOICE_EXPLAIN',
+      });
+
+      await callPromise;
+      await new Promise((r) => setTimeout(r, 20));
+
+      assert.ok(capturedBody, 'LLM call should have been triggered');
+      assert.strictEqual(capturedBody.model, MODEL_DEEPSEEK, 'Multimodal explanation must use DeepSeek as primary');
+      assert.strictEqual(capturedBody.max_tokens, 1000, 'Multimodal explanation max_tokens must be 1000');
+      assert.strictEqual(capturedOpts.timeout, 60000, 'Multimodal explanation timeout must be 60,000ms');
+
+      const userMsg = capturedBody.messages.find((m) => m.role === 'user');
+      assert.ok(Array.isArray(userMsg.content), 'User message content must be an array');
+      assert.strictEqual(userMsg.content[1].type, 'image_url');
+      assert.strictEqual(userMsg.content[1].image_url.url, fakeImageBase64);
     });
   });
 
@@ -770,6 +859,28 @@ function registerAllSuites() {
       assert.strictEqual(passedOpts.timeout, 12345, 'Custom timeoutMs must be forwarded to client options');
       assert.ok(passedOpts.signal instanceof AbortSignal, 'AbortSignal from AbortController must be passed');
     });
+
+    test('4.8 Multimodal failover prevention: ask() with opts.imageBase64 skips text fallback on error', async () => {
+      const calls = [];
+      mockHandler = async (body) => {
+        calls.push(body.model);
+        throw new Error('Vision processing failed on primary model');
+      };
+
+      await assert.rejects(
+        async () => {
+          await ask('Prompt gambar', 'Sys', {
+            primaryModel: MODEL_DEEPSEEK,
+            fallbackModel: MODEL_MIMO,
+            imageBase64: 'data:image/png;base64,abc123',
+          });
+        },
+        /Vision processing failed on primary model/
+      );
+
+      assert.strictEqual(calls.length, 1, 'Should not call text-only fallback when imageBase64 is provided');
+      assert.strictEqual(calls[0], MODEL_DEEPSEEK);
+    });
   });
 
   // ----------------------------------------------------
@@ -873,7 +984,7 @@ function registerAllSuites() {
   // SUITE 6: End-to-End Fallback in Quiz Generation
   // ----------------------------------------------------
   suite('6. End-to-End Fallback in Quiz Generation (generateQuiz)', () => {
-    test('6.1 Light quiz: Mimo fails -> DeepSeek recovers and produces valid quiz', async () => {
+    test('6.1 Text quiz failover: DeepSeek fails -> Mimo recovers and produces valid quiz', async () => {
       const calls = [];
       const originalWarn = console.warn;
       console.warn = () => {};
@@ -881,8 +992,8 @@ function registerAllSuites() {
       try {
         mockHandler = async (body) => {
           calls.push(body.model);
-          if (body.model === MODEL_MIMO) {
-            throw new Error('500 Internal Server Error on Mimo');
+          if (body.model === MODEL_DEEPSEEK) {
+            throw new Error('500 Internal Server Error on DeepSeek');
           }
           return {
             choices: [
@@ -910,8 +1021,8 @@ function registerAllSuites() {
         assert.strictEqual(quiz.correct_answer, 'A');
         assert.strictEqual(quiz.options.A, 'Evaporasi');
         assert.strictEqual(calls.length, 2);
-        assert.strictEqual(calls[0], MODEL_MIMO, 'First attempt must call Mimo (light material primary)');
-        assert.strictEqual(calls[1], MODEL_DEEPSEEK, 'Fallback must call DeepSeek');
+        assert.strictEqual(calls[0], MODEL_DEEPSEEK, 'First attempt must call DeepSeek (universal primary)');
+        assert.strictEqual(calls[1], MODEL_MIMO, 'Fallback must call Mimo');
       } finally {
         console.warn = originalWarn;
       }
@@ -1028,6 +1139,236 @@ function registerAllSuites() {
         kb.inline_keyboard[0].map((b) => b.callback_data),
         ['ANS_A', 'ANS_B', 'ANS_C', 'ANS_D']
       );
+    });
+
+    test('6.6 Multimodal quiz generation creates valid quiz directly from image with empty caption', async () => {
+      let capturedUserContent = null;
+      mockHandler = async (body) => {
+        capturedUserContent = body.messages.find((m) => m.role === 'user').content;
+        return {
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  question: 'Berapakah nilai tegangan V pada rangkaian?',
+                  options: { A: '12V', B: '24V', C: '6V', D: '3V' },
+                  correct_answer: 'A',
+                  explanation: 'Hukum Ohm menyatakan V = I * R.',
+                }),
+              },
+            },
+          ],
+        };
+      };
+
+      const fakeImage = 'data:image/png;base64,circuit_diagram_data';
+      const quiz = await generateQuiz('', fakeImage);
+
+      assert.ok(quiz);
+      assert.strictEqual(quiz.correct_answer, 'A');
+      assert.strictEqual(quiz.options.A, '12V');
+      assert.ok(Array.isArray(capturedUserContent));
+      assert.strictEqual(capturedUserContent[0].type, 'text');
+      assert.strictEqual(
+        capturedUserContent[0].text,
+        'Analisis materi pelajaran pada gambar berikut dan buat 1 soal kuis pilihan ganda.'
+      );
+      assert.strictEqual(capturedUserContent[1].image_url.url, fakeImage);
+    });
+  });
+
+  // ----------------------------------------------------
+  // SUITE 7: Telegram Multimodal Image Handling in bot.js
+  // ----------------------------------------------------
+  suite('7. Telegram Multimodal Image Handling in bot.js', () => {
+    test('7.1 downloadTelegramImageAsBase64 downloads image and returns data URL', async () => {
+      const originalFetch = global.fetch;
+      try {
+        const mockBuffer = Buffer.from('fake-binary-image-data');
+        global.fetch = async (url, opts) => {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => 'image/png' },
+            arrayBuffer: async () =>
+              mockBuffer.buffer.slice(mockBuffer.byteOffset, mockBuffer.byteOffset + mockBuffer.byteLength),
+          };
+        };
+
+        const mockBotInstance = {
+          getFileLink: async (fileId) => `https://api.telegram.org/file/bot/${fileId}.png`,
+        };
+
+        const dataUrl = await downloadTelegramImageAsBase64(mockBotInstance, 'test_file_id_123', 'image/png');
+        assert.ok(dataUrl.startsWith('data:image/png;base64,'));
+        const decoded = Buffer.from(dataUrl.replace('data:image/png;base64,', ''), 'base64').toString();
+        assert.strictEqual(decoded, 'fake-binary-image-data');
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    test('7.2 bot.on message with photo saves imageBase64 & caption and shows CHOICE_KEYBOARD', async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = async () => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'image/jpeg' },
+          arrayBuffer: async () => Buffer.from('sample-photo').buffer,
+        });
+
+        const { mockBot, handlers, sentMessages } = createMockBot();
+        mockBot.getFileLink = async (fileId) => `https://api.telegram.org/file/bot/${fileId}`;
+
+        const chatId = 3001;
+        await handlers.message({
+          chat: { id: chatId },
+          photo: [
+            { file_id: 'thumb_id', width: 100, height: 100 },
+            { file_id: 'highres_id', width: 800, height: 800 },
+          ],
+          caption: 'Tolong jelaskan rumus di papan tulis ini',
+        });
+
+        const s = getState(chatId);
+        assert.strictEqual(s.state, 'IDLE');
+        assert.strictEqual(s.material, 'Tolong jelaskan rumus di papan tulis ini');
+        assert.ok(s.imageBase64 && s.imageBase64.startsWith('data:image/jpeg;base64,'));
+
+        const lastMsg = sentMessages[sentMessages.length - 1];
+        assert.ok(lastMsg.text.includes('dapet gambarnya! 📸'));
+        assert.ok(lastMsg.opts && lastMsg.opts.reply_markup);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    test('7.3 bot.on message with image document saves imageBase64 and shows CHOICE_KEYBOARD', async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = async () => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'image/png' },
+          arrayBuffer: async () => Buffer.from('document-photo').buffer,
+        });
+
+        const { mockBot, handlers, sentMessages } = createMockBot();
+        mockBot.getFileLink = async (fileId) => `https://api.telegram.org/file/bot/${fileId}`;
+
+        const chatId = 3002;
+        await handlers.message({
+          chat: { id: chatId },
+          document: {
+            file_id: 'doc_image_id',
+            mime_type: 'image/png',
+          },
+          caption: '',
+        });
+
+        const s = getState(chatId);
+        assert.strictEqual(s.state, 'IDLE');
+        assert.strictEqual(s.material, '');
+        assert.ok(s.imageBase64 && s.imageBase64.startsWith('data:image/png;base64,'));
+
+        const lastMsg = sentMessages[sentMessages.length - 1];
+        assert.ok(lastMsg.text.includes('dapet gambarnya! 📸'));
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    test('7.4 Image received during locked quiz refuses change and prompts to finish quiz', async () => {
+      const { handlers, sentMessages } = createMockBot();
+      const chatId = 3003;
+
+      setState(chatId, {
+        state: 'AWAITING_ANSWER',
+        material: 'Materi lama',
+        quiz: {
+          question: 'Soal aktif?',
+          options: { A: '1', B: '2', C: '3', D: '4' },
+          correct_answer: 'A',
+          explanation: 'Penjelasan',
+        },
+      });
+
+      await handlers.message({
+        chat: { id: chatId },
+        photo: [{ file_id: 'another_pic' }],
+      });
+
+      const s = getState(chatId);
+      assert.strictEqual(s.state, 'AWAITING_ANSWER');
+      assert.ok(s.quiz);
+      const lastMsg = sentMessages[sentMessages.length - 1];
+      assert.ok(lastMsg.text.includes('soalnya udah dikunci 🔒'));
+    });
+
+    test('7.5 In-memory imageBase64 is cleared after handleQuiz completes', async () => {
+      const { handlers } = createMockBot();
+      const chatId = 3004;
+
+      mockHandler = async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                question: 'Soal dari gambar',
+                options: { A: 'A', B: 'B', C: 'C', D: 'D' },
+                correct_answer: 'B',
+                explanation: 'Penjelasan kuis gambar',
+              }),
+            },
+          },
+        ],
+      });
+
+      setState(chatId, {
+        state: 'IDLE',
+        material: '',
+        imageBase64: 'data:image/png;base64,dummy_bytes',
+      });
+
+      await handlers.callback_query({
+        id: 'cb_quiz_image_cleanup',
+        message: { chat: { id: chatId }, message_id: 100 },
+        data: 'CHOICE_QUIZ',
+      });
+
+      await new Promise((r) => setTimeout(r, 30));
+
+      const s = getState(chatId);
+      assert.strictEqual(s.state, 'AWAITING_ANSWER');
+      assert.strictEqual(s.imageBase64, null, 'imageBase64 must be nullified to prevent memory leaks');
+    });
+
+    test('7.6 In-memory imageBase64 is cleared after handleExplain completes', async () => {
+      const { handlers } = createMockBot();
+      const chatId = 3005;
+
+      mockHandler = async () => ({
+        choices: [{ message: { content: 'Penjelasan gambar selesai.' } }],
+      });
+
+      setState(chatId, {
+        state: 'IDLE',
+        material: 'Materi gambar',
+        imageBase64: 'data:image/jpeg;base64,dummy_bytes_explain',
+      });
+
+      await handlers.callback_query({
+        id: 'cb_explain_image_cleanup',
+        message: { chat: { id: chatId }, message_id: 101 },
+        data: 'CHOICE_EXPLAIN',
+      });
+
+      await new Promise((r) => setTimeout(r, 30));
+
+      const s = getState(chatId);
+      assert.strictEqual(s.state, 'IDLE');
+      assert.strictEqual(s.imageBase64, null, 'imageBase64 must be nullified to prevent memory leaks');
     });
   });
 }

@@ -93,13 +93,16 @@ function validateQuiz(obj) {
   };
 }
 
-// Generate 1 MCQ from material with dynamic model routing and retry on bad JSON
-async function generateQuiz(material) {
+// Generate 1 MCQ from material or image with DeepSeek primary model and retry on bad JSON
+async function generateQuiz(material, imageBase64 = null) {
   const complexity = classifyComplexity(material);
-  const primaryModel = complexity === 'heavy' ? MODEL_DEEPSEEK : MODEL_MIMO;
-  const fallbackModel = complexity === 'heavy' ? MODEL_MIMO : MODEL_DEEPSEEK;
+  const primaryModel = MODEL_DEEPSEEK;
+  const fallbackModel = imageBase64 ? null : MODEL_MIMO;
+  const timeoutMs = imageBase64 || complexity === 'heavy' ? 45000 : 30000;
 
-  const prompt = `Materi belajar dari user:\n\n${truncateMaterial(material)}`;
+  const prompt = material && material.trim()
+    ? `Materi belajar dari user:\n\n${truncateMaterial(material)}`
+    : 'Analisis materi pelajaran pada gambar berikut dan buat 1 soal kuis pilihan ganda.';
   let lastErr = null;
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -111,7 +114,8 @@ async function generateQuiz(material) {
           primaryModel,
           fallbackModel,
           maxTokens: 450,
-          timeoutMs: complexity === 'heavy' ? 45000 : 30000,
+          timeoutMs,
+          imageBase64,
         }
       );
       const json = extractJson(raw);

@@ -1,4 +1,4 @@
-# Multi-Agent Engineering Team Protocol — GampangBot
+# Multi-Agent Engineering Team Protocol: GampangBot
 
 This document defines the autonomous Multi-Agent Engineering Team workflow for developing and maintaining the **GampangBot** project. 
 

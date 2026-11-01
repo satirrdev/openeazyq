@@ -59,11 +59,18 @@ function extractJson(raw) {
 // Helper to execute single model completion with timeout
 async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   const timeoutMs = opts.timeoutMs || TIMEOUT_MS;
+  const userContent = opts.imageBase64
+    ? [
+        { type: 'text', text: prompt || 'Analisis materi pada gambar berikut:' },
+        { type: 'image_url', image_url: { url: opts.imageBase64 } },
+      ]
+    : prompt;
+
   const body = {
     model: modelName,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: prompt },
+      { role: 'user', content: userContent },
     ],
     temperature: 0.7,
   };
@@ -83,14 +90,18 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   }
 }
 
-// Call the LLM with dynamic primary and fallback model routing
+// Call the LLM with primary DeepSeek model and optional fallback
 async function ask(prompt, systemPrompt, opts = {}) {
   const primaryModel = opts.primaryModel || MODEL_DEEPSEEK;
-  const fallbackModel = opts.fallbackModel || MODEL_MIMO;
+  const fallbackModel = opts.fallbackModel !== undefined ? opts.fallbackModel : MODEL_MIMO;
 
   try {
     return await executeModelCall(primaryModel, prompt, systemPrompt, opts);
   } catch (primaryErr) {
+    // Skip fallback when image is attached because text-only models cannot process vision
+    if (opts.imageBase64) {
+      throw primaryErr;
+    }
     if (fallbackModel && fallbackModel !== primaryModel) {
       console.warn(
         `[LLM Fallback] Primary model "${primaryModel}" failed (${primaryErr.message}). Retrying with fallback "${fallbackModel}"...`
