@@ -1,17 +1,26 @@
 require('dotenv').config();
-
+const http = require('http'); // Modul bawaan Node.js, nggak perlu install
 const TelegramBot = require('node-telegram-bot-api');
 const botModule = require('./bot');
 
+// 1. DUMMY HTTP SERVER (Wajib buat Render Web Service)
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('GampangBot is active and polling.\n');
+}).listen(PORT, () => {
+  console.log(`Dummy health check server running on port ${PORT}`);
+});
+
+// 2. INISIALISASI TELEGRAM BOT (Polling)
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
   console.error('TELEGRAM_BOT_TOKEN tidak ada di .env, gan!');
   process.exit(1);
 }
+const bot = new TelegramBot(token, { polling: { autoRestart: true } });
 
-// Long polling for local dev (MVP phase); autoRestart heals flaky networks
-const bot = new TelegramBot(token, { polling: { autoRestart: true, interval: 1500 } });
-
+// 3. REGISTER ROUTES & ERROR HANDLER
 botModule.register(bot);
 
 bot.on('polling_error', (err) => {
@@ -22,12 +31,9 @@ bot.on('error', (err) => {
   console.error('Bot error event:', err.message);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception thrown:', err);
+  console.error('Uncaught Exception:', err);
 });
-
-console.log('🤖 GampangBot jalan nih! Legs polling aktif. Gaskeun!');
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Rejection:', err);
+});
