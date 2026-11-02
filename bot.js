@@ -21,6 +21,7 @@ const {
   buildQuizKeyboard,
   buildQuestionText,
 } = require('./quiz');
+const { performBackup } = require('./backup');
 
 const AI_BUSY_MSG = ERROR_MSG;
 
@@ -404,6 +405,24 @@ function register(bot) {
       );
     } catch (err) {
       bot.sendMessage(msg.chat.id, `⚠️ Gagal kirim notifikasi ke user: ${err.message}`);
+    }
+  });
+
+  bot.onText(/^\/backup(?:@\w+)?(?:\s.*)?$/, async (msg) => {
+    const adminId = process.env.ADMIN_ID;
+    if (!adminId || !msg.from || String(msg.from.id) !== String(adminId)) {
+      bot.sendMessage(msg.chat.id, 'Akses ditolak. Perintah ini cuma buat admin.');
+      return;
+    }
+
+    const chatId = msg.chat.id;
+    await bot.sendMessage(chatId, 'Siap, lagi nyiapin file backup data... ⏳');
+
+    try {
+      await performBackup(bot, chatId);
+    } catch (err) {
+      console.error('[Backup] Manual backup failed:', err.message);
+      bot.sendMessage(chatId, `⚠️ Gagal bikin backup: ${err.message}`);
     }
   });
 

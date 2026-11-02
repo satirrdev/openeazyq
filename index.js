@@ -2,6 +2,7 @@ require('dotenv').config();
 const http = require('http'); // Modul bawaan Node.js, nggak perlu install
 const TelegramBot = require('node-telegram-bot-api');
 const botModule = require('./bot');
+const { startBackupScheduler } = require('./backup');
 
 // 1. DUMMY HTTP SERVER (Wajib buat Render Web Service)
 const PORT = process.env.PORT || 3000;
@@ -22,6 +23,9 @@ const bot = new TelegramBot(token, { polling: { autoRestart: true } });
 
 // 3. REGISTER ROUTES & ERROR HANDLER
 botModule.register(bot);
+
+// 4. START AUTOMATIC BACKUP SCHEDULER
+startBackupScheduler(bot);
 
 bot.on('polling_error', (err) => {
   console.error('Polling error:', err.message);

@@ -7,7 +7,7 @@ Compact operational guide for AI agents working in this repository.
 - **Run the bot:** `node index.js` (or `npm start`).
 - **Syntax validation (fast verification):**
   ```bash
-  node -c index.js bot.js llm.js quiz.js math.js store.js
+  node -c index.js bot.js llm.js quiz.js math.js store.js backup.js
   ```
 - **Single test / test script:** No formal test runner (Jest/Mocha) is installed. Run targeted verification scripts directly: `node <script_path>.js`.
 
@@ -19,6 +19,7 @@ llm.js    --> OpenAI client instance, ask() with primary-to-fallback failover, e
 quiz.js   --> System prompts (quiz, explain, hint), quiz generator with JSON validation/retry, keyboard builders.
 math.js   --> latexToUnicode() regex pipeline converting LaTeX syntax into clean Unicode for Telegram.
 store.js  --> Quota tracking & premium store, atomic persistence to data/users.json.
+backup.js --> Zero-dependency PKZIP generator, daily 05:00 UTC scheduler, backup delivery service.
 ```
 
 ## 3. Environment Variables (.env)
@@ -28,7 +29,7 @@ Required keys in `.env` (never commit `.env`):
 - `AI_API_KEY`: API key for the AI provider.
 - `AI_MODEL_NAME`: Primary model ID (defaults to `deepseek-v4.1-flash:free` if unset).
 - `AI_FALLBACK_MODEL_NAME`: Automatic failover model (defaults to `mimo-v2.6-flash:free`).
-- `ADMIN_ID`: Telegram user ID of admin authorized to run `/upgrade`.
+- `ADMIN_ID`: Telegram user ID of admin authorized to run `/upgrade` and `/backup`.
 - `PORT`: Optional port (defaults to 3000).
 
 ## 4. State Machine & Concurrency Guardrails
@@ -105,4 +106,12 @@ Telegram's `parse_mode: 'Markdown'` crashes with `400 Bad Request: can't parse e
 - **Dual-Layer Enforcement:**
   - Lazy check inside `getState(chatId)` resets expired sessions upon next message.
   - Periodic background sweep via `cleanupIdleUsers()` runs every 5 minutes with unref'd timer.
+
+## 11. Scheduled Automatic Backup & Admin /backup Command (`backup.js`)
+- **Zero-Dependency PKZIP Generator (`createZipBuffer`):** Pure Node.js built-ins (`zlib`, `Buffer`, `fs`, `path`) producing valid PKZIP format (Local headers, Deflate compression method 8, CRC-32 checksums, Central Directory, and EOCD record) without external dependencies.
+- **Archive & Metadata Assembler (`createBackupArchive`):** Bundles current persistence file `users.json` and generated `metadata.json` (timestamps in UTC and Jakarta WIB, total user count, active premium count, application version, and environment details).
+- **Delivery Service (`performBackup`):** Delivers ZIP archive to `ADMIN_ID` via `bot.sendDocument` with Indonesian caption. Catches entity parse errors and falls back to plain text delivery.
+- **Daily 05:00 UTC Scheduler (`startBackupScheduler`):** Calculates exact milliseconds until 05:00 UTC (`getMsUntilNext0500UTC`), sets unref'd timer, delivers daily backup to admin, and reschedules for the next day.
+- **Admin Command (`/backup`):** Allows authorized `ADMIN_ID` to manually trigger an immediate backup delivery anytime directly in Telegram.
+
 
