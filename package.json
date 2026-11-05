@@ -1,10 +1,11 @@
 {
   "name": "gampangbot",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "GampangBot: AI exam quiz assistant on Telegram",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "panel": "node panel.js"
   },
   "license": "MIT",
   "dependencies": {

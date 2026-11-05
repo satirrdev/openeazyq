@@ -138,6 +138,8 @@ function createZipBuffer(files) {
 function createBackupArchive(options = {}) {
   const dataDir = options.dataDir || path.join(__dirname, 'data');
   const usersPath = options.usersPath || path.join(dataDir, 'users.json');
+  const providersPath = options.providersPath || path.join(dataDir, 'providers.json');
+  const panelConfigPath = options.panelConfigPath || path.join(dataDir, 'panel_config.json');
 
   let usersContent = '{}';
   if (fs.existsSync(usersPath)) {
@@ -148,11 +150,36 @@ function createBackupArchive(options = {}) {
     }
   }
 
+  let providersContent = '[]';
+  if (fs.existsSync(providersPath)) {
+    try {
+      providersContent = fs.readFileSync(providersPath, 'utf8');
+    } catch (err) {
+      console.error('[Backup] Failed to read providers.json:', err.message);
+    }
+  }
+
+  let panelConfigContent = '{}';
+  if (fs.existsSync(panelConfigPath)) {
+    try {
+      panelConfigContent = fs.readFileSync(panelConfigPath, 'utf8');
+    } catch (err) {
+      console.error('[Backup] Failed to read panel_config.json:', err.message);
+    }
+  }
+
   let usersObj = {};
   try {
     usersObj = JSON.parse(usersContent);
   } catch (err) {
     console.error('[Backup] Failed to parse users.json:', err.message);
+  }
+
+  let providersArr = [];
+  try {
+    providersArr = JSON.parse(providersContent);
+  } catch (err) {
+    console.error('[Backup] Failed to parse providers.json:', err.message);
   }
 
   const userIds = Object.keys(usersObj);
@@ -166,7 +193,9 @@ function createBackupArchive(options = {}) {
     }
   }
 
-  let appVersion = '0.1.0';
+  const providerCount = Array.isArray(providersArr) ? providersArr.length : 0;
+
+  let appVersion = '1.0.0';
   try {
     const pkgPath = path.join(__dirname, 'package.json');
     if (fs.existsSync(pkgPath)) {
@@ -190,6 +219,7 @@ function createBackupArchive(options = {}) {
     createdAtWIB,
     userCount,
     premiumCount,
+    providerCount,
     nodeVersion: process.version,
     platform: process.platform,
   };
@@ -214,6 +244,8 @@ function createBackupArchive(options = {}) {
 
   const files = [
     { name: 'users.json', data: usersContent, date: createdAt },
+    { name: 'providers.json', data: providersContent, date: createdAt },
+    { name: 'panel_config.json', data: panelConfigContent, date: createdAt },
     {
       name: 'metadata.json',
       data: JSON.stringify(metadata, null, 2),

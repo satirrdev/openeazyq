@@ -1,5 +1,6 @@
 const { ask, extractJson, MODEL_DEEPSEEK, MODEL_MIMO } = require('./llm');
 const { latexToUnicode } = require('./math');
+const store = require('./store');
 const {
   canTakeQuiz,
   canExplain,
@@ -9,9 +10,10 @@ const {
   recordImageUsage,
   upgradeUser,
   getUserQuota,
+  getAllUsers,
   DAILY_EXPLAIN_LIMIT,
   DAILY_IMAGE_LIMIT,
-} = require('./store');
+} = store;
 const {
   EXPLAIN_SYSTEM_PROMPT,
   HINT_SYSTEM_PROMPT,
@@ -43,6 +45,8 @@ function cleanMarkdown(text) {
 // Registry shape: { state, quiz, messageId, history, lastActivity }
 const state = new Map();
 const IDLE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+let botInstance = null;
+let isBroadcastingActive = false;
 
 function getState(chatId) {
   const now = Date.now();
@@ -198,6 +202,9 @@ async function downloadTelegramImageAsBase64(bot, fileId, defaultMime = 'image/j
 }
 
 function register(bot) {
+  botInstance = bot;
+  if (!bot) return;
+
   const BOT_COMMANDS = [
     { command: 'start', description: 'Mulai bot & panduan belajar' },
     { command: 'quiz', description: 'Buat kuis pilihan ganda dari materi' },
@@ -787,6 +794,93 @@ function register(bot) {
   }
 }
 
+function isBroadcasting() {
+  return isBroadcastingActive;
+}
+
+function setBotInstance(bot) {
+  botInstance = bot;
+}
+
+function getBotInstance() {
+  return botInstance;
+}
+
+async function sendDirectMessage(userId, text, opts = {}) {
+  if (!botInstance) {
+    throw new Error('Bot instance belum diinisialisasi');
+  }
+  if (!userId) {
+    throw new Error('User ID tidak boleh kosong');
+  }
+  try {
+    const result = await sendSmart(botInstance, userId, text, opts);
+    return {
+      success: true,
+      messageId: result?.message_id,
+    };
+  } catch (err) {
+    throw new Error(`Gagal mengirim pesan ke ${userId}: ${err.message || String(err)}`);
+  }
+}
+
+async function broadcastMessage(text, options = {}) {
+  if (isBroadcastingActive) {
+    throw new Error('Broadcast sedang berjalan');
+  }
+  if (!botInstance) {
+    throw new Error('Bot instance belum diinisialisasi');
+  }
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    throw new Error('Pesan broadcast tidak boleh kosong');
+  }
+
+  isBroadcastingActive = true;
+  try {
+    const allUsers = typeof store.getAllUsers === 'function'
+      ? store.getAllUsers()
+      : (typeof getAllUsers === 'function' ? getAllUsers() : []);
+    const validUsers = allUsers.filter((u) => {
+      if (!u || u.userId === undefined || u.userId === null) return false;
+      const strId = String(u.userId).trim();
+      return /^-?\d+$/.test(strId);
+    });
+
+    const delayMs = typeof options.delayMs === 'number'
+      ? options.delayMs
+      : (typeof options.delay === 'number' ? options.delay : 60);
+
+    let sent = 0;
+    const failures = [];
+
+    for (let i = 0; i < validUsers.length; i++) {
+      const user = validUsers[i];
+      try {
+        await sendSmart(botInstance, user.userId, text);
+        sent++;
+      } catch (err) {
+        failures.push({
+          userId: user.userId,
+          error: err.message || String(err),
+        });
+      }
+
+      if (i < validUsers.length - 1 && delayMs > 0) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+
+    return {
+      total: validUsers.length,
+      sent,
+      failed: failures.length,
+      failures,
+    };
+  } finally {
+    isBroadcastingActive = false;
+  }
+}
+
 module.exports = {
   register,
   getState,
@@ -798,4 +892,9 @@ module.exports = {
   downloadTelegramImageAsBase64,
   sendSmart,
   splitIntoChunks,
+  sendDirectMessage,
+  broadcastMessage,
+  isBroadcasting,
+  setBotInstance,
+  getBotInstance,
 };

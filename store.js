@@ -9,6 +9,108 @@ const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const TMP_FILE = path.join(DATA_DIR, 'users.json.tmp');
 
+let globalLimits = {
+  quiz: DAILY_QUIZ_LIMIT,
+  explain: DAILY_EXPLAIN_LIMIT,
+  image: DAILY_IMAGE_LIMIT,
+};
+
+function loadLimitsFromConfig() {
+  const configPath = path.join(DATA_DIR, 'panel_config.json');
+  if (fs.existsSync(configPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (cfg && typeof cfg.limits === 'object' && cfg.limits !== null) {
+        globalLimits = {
+          quiz: cfg.limits.quiz !== undefined ? parseLimit(cfg.limits.quiz, DAILY_QUIZ_LIMIT) : DAILY_QUIZ_LIMIT,
+          explain: cfg.limits.explain !== undefined ? parseLimit(cfg.limits.explain, DAILY_EXPLAIN_LIMIT) : DAILY_EXPLAIN_LIMIT,
+          image: cfg.limits.image !== undefined ? parseLimit(cfg.limits.image, DAILY_IMAGE_LIMIT) : DAILY_IMAGE_LIMIT,
+        };
+      }
+    } catch (_) {}
+  }
+}
+
+function parseLimit(val, fallback) {
+  if (val === null || val === 'unlimited' || val === 'infinity' || val === Infinity || val === -1 || val === '-1') {
+    return Infinity;
+  }
+  const n = Number(val);
+  return !isNaN(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+loadLimitsFromConfig();
+
+function getGlobalLimits() {
+  loadLimitsFromConfig();
+  return { ...globalLimits };
+}
+
+function setGlobalLimits(limits) {
+  if (!limits || typeof limits !== 'object') {
+    throw new Error('Limits harus berupa objek');
+  }
+  const configPath = path.join(DATA_DIR, 'panel_config.json');
+  const tmpPath = path.join(DATA_DIR, 'panel_config.json.tmp');
+  let cfg = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch (_) {}
+  }
+
+  const updatedLimits = {
+    quiz: limits.quiz !== undefined ? parseLimit(limits.quiz, DAILY_QUIZ_LIMIT) : globalLimits.quiz,
+    explain: limits.explain !== undefined ? parseLimit(limits.explain, DAILY_EXPLAIN_LIMIT) : globalLimits.explain,
+    image: limits.image !== undefined ? parseLimit(limits.image, DAILY_IMAGE_LIMIT) : globalLimits.image,
+  };
+
+  cfg.limits = updatedLimits;
+  globalLimits = updatedLimits;
+
+  ensureDataDir();
+  fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2), 'utf8');
+  fs.renameSync(tmpPath, configPath);
+  return { ...globalLimits };
+}
+
+function getQuizLimit(userId) {
+  if (userId && users[String(userId)]?.customLimits?.quiz !== undefined) {
+    return parseLimit(users[String(userId)].customLimits.quiz, DAILY_QUIZ_LIMIT);
+  }
+  return parseLimit(globalLimits.quiz, DAILY_QUIZ_LIMIT);
+}
+
+function getExplainLimit(userId) {
+  if (userId && users[String(userId)]?.customLimits?.explain !== undefined) {
+    return parseLimit(users[String(userId)].customLimits.explain, DAILY_EXPLAIN_LIMIT);
+  }
+  return parseLimit(globalLimits.explain, DAILY_EXPLAIN_LIMIT);
+}
+
+function getImageLimit(userId) {
+  if (userId && users[String(userId)]?.customLimits?.image !== undefined) {
+    return parseLimit(users[String(userId)].customLimits.image, DAILY_IMAGE_LIMIT);
+  }
+  return parseLimit(globalLimits.image, DAILY_IMAGE_LIMIT);
+}
+
+function setUserLimits(userId, limits) {
+  const user = getUser(userId);
+  if (!user.customLimits) {
+    user.customLimits = {};
+  }
+  if (limits === null) {
+    delete user.customLimits;
+  } else {
+    if (limits.quiz !== undefined) user.customLimits.quiz = parseLimit(limits.quiz, DAILY_QUIZ_LIMIT);
+    if (limits.explain !== undefined) user.customLimits.explain = parseLimit(limits.explain, DAILY_EXPLAIN_LIMIT);
+    if (limits.image !== undefined) user.customLimits.image = parseLimit(limits.image, DAILY_IMAGE_LIMIT);
+  }
+  saveUsers();
+  return user;
+}
+
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -70,19 +172,22 @@ function getUser(userId) {
 function canTakeQuiz(userId) {
   const user = getUser(userId);
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
-  return isPremium || user.quizCount < DAILY_QUIZ_LIMIT;
+  const limit = getQuizLimit(userId);
+  return isPremium || limit === Infinity || user.quizCount < limit;
 }
 
 function canExplain(userId) {
   const user = getUser(userId);
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
-  return isPremium || user.explainCount < DAILY_EXPLAIN_LIMIT;
+  const limit = getExplainLimit(userId);
+  return isPremium || limit === Infinity || user.explainCount < limit;
 }
 
 function canUploadImage(userId) {
   const user = getUser(userId);
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
-  return isPremium || user.imageCount < DAILY_IMAGE_LIMIT;
+  const limit = getImageLimit(userId);
+  return isPremium || limit === Infinity || user.imageCount < limit;
 }
 
 function recordQuizUsage(userId) {
@@ -109,7 +214,7 @@ function recordImageUsage(userId) {
   return user;
 }
 
-function upgradeUser(userId, days) {
+function addPremiumDays(userId, days) {
   const user = getUser(userId);
   const now = Date.now();
   const durationMs = Number(days) * MS_PER_DAY;
@@ -124,31 +229,102 @@ function upgradeUser(userId, days) {
   return user;
 }
 
+function upgradeUser(userId, days) {
+  return addPremiumDays(userId, days);
+}
+
+function resetUserQuota(userId, type = 'all') {
+  const user = getUser(userId);
+  const targetType = String(type || 'all').toLowerCase();
+
+  if (targetType === 'quiz') {
+    user.quizCount = 0;
+  } else if (targetType === 'explain') {
+    user.explainCount = 0;
+  } else if (targetType === 'image') {
+    user.imageCount = 0;
+  } else {
+    user.quizCount = 0;
+    user.explainCount = 0;
+    user.imageCount = 0;
+  }
+
+  user.lastQuizDate = getTodayWIB();
+  saveUsers();
+  return user;
+}
+
+function deleteUser(userId) {
+  const id = String(userId);
+  if (Object.prototype.hasOwnProperty.call(users, id)) {
+    delete users[id];
+    saveUsers();
+    return true;
+  }
+  return false;
+}
+
+function getAllUsers() {
+  const userIds = Object.keys(users);
+  return userIds.map((id) => {
+    const user = getUser(id);
+    const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
+    const d = new Date(user.premiumUntil);
+    const isValidDate = !isNaN(d.getTime());
+    const formattedJakartaExpiry = typeof user.premiumUntil === 'number' && user.premiumUntil > 0 && isValidDate
+      ? d.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
+      : null;
+
+    const quizLimit = getQuizLimit(id);
+    const explainLimit = getExplainLimit(id);
+    const imageLimit = getImageLimit(id);
+
+    return {
+      userId: id,
+      quizCount: user.quizCount,
+      explainCount: user.explainCount,
+      imageCount: user.imageCount,
+      lastQuizDate: user.lastQuizDate,
+      premiumUntil: user.premiumUntil,
+      isPremium,
+      formattedJakartaExpiry,
+      customLimits: user.customLimits || null,
+      quizLimit: quizLimit === Infinity ? 'unlimited' : quizLimit,
+      explainLimit: explainLimit === Infinity ? 'unlimited' : explainLimit,
+      imageLimit: imageLimit === Infinity ? 'unlimited' : imageLimit,
+    };
+  });
+}
+
 function getUserQuota(userId) {
   const user = getUser(userId);
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
-  const remainingQuiz = isPremium ? Infinity : Math.max(0, DAILY_QUIZ_LIMIT - user.quizCount);
-  const remainingExplain = isPremium ? Infinity : Math.max(0, DAILY_EXPLAIN_LIMIT - user.explainCount);
-  const remainingImage = isPremium ? Infinity : Math.max(0, DAILY_IMAGE_LIMIT - user.imageCount);
+  const quizLimit = getQuizLimit(userId);
+  const explainLimit = getExplainLimit(userId);
+  const imageLimit = getImageLimit(userId);
+
+  const remainingQuiz = isPremium || quizLimit === Infinity ? Infinity : Math.max(0, quizLimit - user.quizCount);
+  const remainingExplain = isPremium || explainLimit === Infinity ? Infinity : Math.max(0, explainLimit - user.explainCount);
+  const remainingImage = isPremium || imageLimit === Infinity ? Infinity : Math.max(0, imageLimit - user.imageCount);
   return {
     isPremium,
     premiumUntil: user.premiumUntil,
     used: user.quizCount,
-    total: DAILY_QUIZ_LIMIT,
+    total: quizLimit === Infinity ? Infinity : quizLimit,
     remaining: remainingQuiz,
     quiz: {
       used: user.quizCount,
-      total: DAILY_QUIZ_LIMIT,
+      total: quizLimit === Infinity ? Infinity : quizLimit,
       remaining: remainingQuiz,
     },
     explain: {
       used: user.explainCount,
-      total: DAILY_EXPLAIN_LIMIT,
+      total: explainLimit === Infinity ? Infinity : explainLimit,
       remaining: remainingExplain,
     },
     image: {
       used: user.imageCount,
-      total: DAILY_IMAGE_LIMIT,
+      total: imageLimit === Infinity ? Infinity : imageLimit,
       remaining: remainingImage,
     },
   };
@@ -158,6 +334,12 @@ module.exports = {
   DAILY_QUIZ_LIMIT,
   DAILY_EXPLAIN_LIMIT,
   DAILY_IMAGE_LIMIT,
+  getGlobalLimits,
+  setGlobalLimits,
+  setUserLimits,
+  getQuizLimit,
+  getExplainLimit,
+  getImageLimit,
   getTodayWIB,
   getUser,
   canTakeQuiz,
@@ -167,5 +349,9 @@ module.exports = {
   recordExplainUsage,
   recordImageUsage,
   upgradeUser,
+  addPremiumDays,
+  resetUserQuota,
+  deleteUser,
+  getAllUsers,
   getUserQuota,
 };

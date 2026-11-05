@@ -139,9 +139,33 @@ function extractJson(raw) {
   }
 }
 
+const clientPool = new Map();
+function getOpenAIClient(baseURL, apiKey, timeoutMs = TIMEOUT_MS) {
+  if (
+    (!baseURL || baseURL === process.env.AI_BASE_URL) &&
+    (!apiKey || apiKey === process.env.AI_API_KEY)
+  ) {
+    return client;
+  }
+  const key = `${baseURL}:::${apiKey}`;
+  if (!clientPool.has(key)) {
+    clientPool.set(
+      key,
+      new OpenAI({
+        baseURL: baseURL || process.env.AI_BASE_URL,
+        apiKey: apiKey || process.env.AI_API_KEY,
+        timeout: timeoutMs,
+        maxRetries: 0,
+      })
+    );
+  }
+  return clientPool.get(key);
+}
+
 // Helper to execute single model completion with timeout
 async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   const timeoutMs = opts.timeoutMs || TIMEOUT_MS;
+  const activeClient = opts.client || client;
   const userContent = opts.imageBase64
     ? [
         { type: 'text', text: prompt || 'Analisis materi pada gambar berikut:' },
@@ -182,7 +206,7 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   try {
     let completion;
     try {
-      completion = await client.chat.completions.create(body, {
+      completion = await activeClient.chat.completions.create(body, {
         signal: controller.signal,
         timeout: timeoutMs,
       });
@@ -191,7 +215,7 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
       if (body.stop && /stop/i.test(createErr.message || '')) {
         const bodyWithoutStop = { ...body };
         delete bodyWithoutStop.stop;
-        completion = await client.chat.completions.create(bodyWithoutStop, {
+        completion = await activeClient.chat.completions.create(bodyWithoutStop, {
           signal: controller.signal,
           timeout: timeoutMs,
         });
@@ -211,31 +235,184 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
   }
 }
 
-// Call the LLM with primary DeepSeek model and optional fallback
-async function ask(prompt, systemPrompt, opts = {}) {
-  const primaryModel = opts.primaryModel || MODEL_DEEPSEEK;
-  const fallbackModel = opts.fallbackModel !== undefined ? opts.fallbackModel : MODEL_MIMO;
+// Helper to execute Anthropic API call with timeout
+async function executeAnthropicCall(provider, prompt, systemPrompt, opts = {}) {
+  const timeoutMs = opts.timeoutMs || TIMEOUT_MS;
+  const cleanBase = String(provider.baseURL || 'https://api.anthropic.com/v1').trim().replace(/\/+$/, '');
+  const url = `${cleanBase}/messages`;
 
-  try {
-    return await executeModelCall(primaryModel, prompt, systemPrompt, opts);
-  } catch (primaryErr) {
-    // Skip fallback when image is attached because text-only models cannot process vision
-    if (opts.imageBase64) {
-      throw primaryErr;
-    }
-    if (fallbackModel && fallbackModel !== primaryModel) {
-      console.warn(
-        `[LLM Fallback] Primary model "${primaryModel}" failed (${primaryErr.message}). Retrying with fallback "${fallbackModel}"...`
-      );
-      try {
-        return await executeModelCall(fallbackModel, prompt, systemPrompt, opts);
-      } catch (fallbackErr) {
-        console.error(`[LLM Fallback] Fallback model "${fallbackModel}" also failed:`, fallbackErr.message);
-        throw fallbackErr;
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-api-key': provider.apiKey || '',
+    'anthropic-version': '2023-06-01',
+  };
+
+  const messages = [];
+  if (Array.isArray(opts.history) && opts.history.length > 0) {
+    for (const h of opts.history) {
+      if (
+        h &&
+        (h.role === 'user' || h.role === 'assistant') &&
+        typeof h.content === 'string' &&
+        h.content.trim()
+      ) {
+        messages.push({ role: h.role, content: h.content.trim() });
       }
     }
-    throw primaryErr;
   }
+
+  let userContent;
+  if (opts.imageBase64) {
+    let mimeType = 'image/jpeg';
+    let base64Data = opts.imageBase64;
+    const match = opts.imageBase64.match(/^data:([^;]+);base64,(.+)$/);
+    if (match) {
+      mimeType = match[1];
+      base64Data = match[2];
+    }
+    userContent = [
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: mimeType,
+          data: base64Data,
+        },
+      },
+      {
+        type: 'text',
+        text: prompt || 'Analisis materi pada gambar berikut:',
+      },
+    ];
+  } else {
+    userContent = prompt;
+  }
+
+  messages.push({ role: 'user', content: userContent });
+
+  const body = {
+    model: provider.model,
+    max_tokens: opts.maxTokens || 2048,
+    messages,
+  };
+  if (systemPrompt) {
+    body.system = systemPrompt;
+  }
+  if (typeof opts.temperature === 'number') {
+    body.temperature = opts.temperature;
+  }
+  if (Array.isArray(opts.stop) && opts.stop.length > 0) {
+    body.stop_sequences = opts.stop;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Anthropic HTTP ${res.status}: ${errText.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const textBlock = Array.isArray(data.content) ? data.content.find((c) => c.type === 'text') : null;
+    const content = textBlock && textBlock.text ? textBlock.text.trim() : '';
+    if (!content) {
+      throw new Error(`Anthropic model ${provider.model} returned empty response`);
+    }
+    return content;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Call the LLM with dynamic multi-provider fallback or specific model override
+async function ask(prompt, systemPrompt, opts = {}) {
+  // If specific models are passed (e.g. from unit tests), preserve legacy two-model routing
+  if (opts.primaryModel) {
+    const primaryModel = opts.primaryModel;
+    const fallbackModel = opts.fallbackModel !== undefined ? opts.fallbackModel : MODEL_MIMO;
+
+    try {
+      return await executeModelCall(primaryModel, prompt, systemPrompt, opts);
+    } catch (primaryErr) {
+      // Skip fallback when image is attached because text-only models cannot process vision
+      if (opts.imageBase64) {
+        throw primaryErr;
+      }
+      if (fallbackModel && fallbackModel !== primaryModel) {
+        console.warn(
+          `[LLM Fallback] Primary model "${primaryModel}" failed (${primaryErr.message}). Retrying with fallback "${fallbackModel}"...`
+        );
+        try {
+          return await executeModelCall(fallbackModel, prompt, systemPrompt, opts);
+        } catch (fallbackErr) {
+          console.error(`[LLM Fallback] Fallback model "${fallbackModel}" also failed:`, fallbackErr.message);
+          throw fallbackErr;
+        }
+      }
+      throw primaryErr;
+    }
+  }
+
+  // Dynamic multi-provider fallback chain from providers.js
+  let candidates = [];
+  try {
+    const providersModule = require('./providers');
+    candidates = providersModule.getActiveProviders({ visionRequired: Boolean(opts.imageBase64) });
+  } catch (_) {}
+
+  // Fallback if no providers are registered or module unavailable
+  if (!candidates || candidates.length === 0) {
+    candidates = [
+      {
+        id: 'provider_primary',
+        name: 'Primary AI',
+        type: 'openai',
+        baseURL: process.env.AI_BASE_URL,
+        apiKey: process.env.AI_API_KEY,
+        model: MODEL_DEEPSEEK,
+        supportsVision: true,
+      },
+      ...(!opts.imageBase64
+        ? [
+            {
+              id: 'provider_fallback',
+              name: 'Fallback AI',
+              type: 'openai',
+              baseURL: process.env.AI_BASE_URL,
+              apiKey: process.env.AI_API_KEY,
+              model: MODEL_MIMO,
+              supportsVision: false,
+            },
+          ]
+        : []),
+    ];
+  }
+
+  let lastError = null;
+  for (let i = 0; i < candidates.length; i++) {
+    const provider = candidates[i];
+    try {
+      if (provider.type === 'anthropic') {
+        return await executeAnthropicCall(provider, prompt, systemPrompt, opts);
+      } else {
+        const targetClient = getOpenAIClient(provider.baseURL, provider.apiKey, opts.timeoutMs || TIMEOUT_MS);
+        return await executeModelCall(provider.model, prompt, systemPrompt, { ...opts, client: targetClient });
+      }
+    } catch (err) {
+      lastError = err;
+      console.warn(`[AI Engine] Provider "${provider.name || provider.model}" failed (${err.message}). Trying next provider...`);
+    }
+  }
+
+  console.error(`[AI Engine] All active AI providers failed. Last error: ${lastError?.message}`);
+  throw new Error(ERROR_MSG);
 }
 
 module.exports = {
