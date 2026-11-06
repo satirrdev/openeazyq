@@ -35,8 +35,11 @@ function parseLimit(val, fallback) {
   if (val === null || val === 'unlimited' || val === 'infinity' || val === Infinity || val === -1 || val === '-1') {
     return Infinity;
   }
+  if (val === '' || val === undefined) {
+    return fallback;
+  }
   const n = Number(val);
-  return !isNaN(n) && n > 0 ? Math.floor(n) : fallback;
+  return !isNaN(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
 loadLimitsFromConfig();
@@ -75,37 +78,65 @@ function setGlobalLimits(limits) {
 }
 
 function getQuizLimit(userId) {
-  if (userId && users[String(userId)]?.customLimits?.quiz !== undefined) {
-    return parseLimit(users[String(userId)].customLimits.quiz, DAILY_QUIZ_LIMIT);
+  loadLimitsFromConfig();
+  const id = String(userId);
+  if (userId && users[id]?.customLimits?.quiz !== undefined) {
+    return parseLimit(users[id].customLimits.quiz, DAILY_QUIZ_LIMIT);
   }
   return parseLimit(globalLimits.quiz, DAILY_QUIZ_LIMIT);
 }
 
 function getExplainLimit(userId) {
-  if (userId && users[String(userId)]?.customLimits?.explain !== undefined) {
-    return parseLimit(users[String(userId)].customLimits.explain, DAILY_EXPLAIN_LIMIT);
+  loadLimitsFromConfig();
+  const id = String(userId);
+  if (userId && users[id]?.customLimits?.explain !== undefined) {
+    return parseLimit(users[id].customLimits.explain, DAILY_EXPLAIN_LIMIT);
   }
   return parseLimit(globalLimits.explain, DAILY_EXPLAIN_LIMIT);
 }
 
 function getImageLimit(userId) {
-  if (userId && users[String(userId)]?.customLimits?.image !== undefined) {
-    return parseLimit(users[String(userId)].customLimits.image, DAILY_IMAGE_LIMIT);
+  loadLimitsFromConfig();
+  const id = String(userId);
+  if (userId && users[id]?.customLimits?.image !== undefined) {
+    return parseLimit(users[id].customLimits.image, DAILY_IMAGE_LIMIT);
   }
   return parseLimit(globalLimits.image, DAILY_IMAGE_LIMIT);
 }
 
 function setUserLimits(userId, limits) {
   const user = getUser(userId);
+  if (limits === null) {
+    delete user.customLimits;
+    saveUsers();
+    return user;
+  }
+
   if (!user.customLimits) {
     user.customLimits = {};
   }
-  if (limits === null) {
+
+  const applyField = (field, fallback) => {
+    if (limits[field] === undefined) return;
+    const v = typeof limits[field] === 'string' ? limits[field].trim().toLowerCase() : limits[field];
+    if (v === '' || v === null) {
+      delete user.customLimits[field];
+    } else if (v === 'unlimited' || v === 'infinity' || v === Infinity || v === -1 || v === '-1') {
+      user.customLimits[field] = 'unlimited';
+    } else {
+      const n = Number(v);
+      if (!isNaN(n) && n >= 0) {
+        user.customLimits[field] = Math.floor(n);
+      }
+    }
+  };
+
+  applyField('quiz', DAILY_QUIZ_LIMIT);
+  applyField('explain', DAILY_EXPLAIN_LIMIT);
+  applyField('image', DAILY_IMAGE_LIMIT);
+
+  if (Object.keys(user.customLimits).length === 0) {
     delete user.customLimits;
-  } else {
-    if (limits.quiz !== undefined) user.customLimits.quiz = parseLimit(limits.quiz, DAILY_QUIZ_LIMIT);
-    if (limits.explain !== undefined) user.customLimits.explain = parseLimit(limits.explain, DAILY_EXPLAIN_LIMIT);
-    if (limits.image !== undefined) user.customLimits.image = parseLimit(limits.image, DAILY_IMAGE_LIMIT);
   }
   saveUsers();
   return user;
@@ -117,10 +148,33 @@ function ensureDataDir() {
   }
 }
 
+let lastUsersFileMtime = 0;
+
+function syncUsersFromDisk() {
+  ensureDataDir();
+  if (!fs.existsSync(USERS_FILE)) return;
+  try {
+    const stat = fs.statSync(USERS_FILE);
+    if (stat.mtimeMs > lastUsersFileMtime) {
+      const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+      if (data && typeof data === 'object') {
+        for (const k of Object.keys(users)) {
+          if (!data[k]) delete users[k];
+        }
+        for (const [k, v] of Object.entries(data)) {
+          users[k] = v;
+        }
+        lastUsersFileMtime = stat.mtimeMs;
+      }
+    }
+  } catch (_) {}
+}
+
 function loadUsers() {
   ensureDataDir();
   if (fs.existsSync(USERS_FILE)) {
     try {
+      lastUsersFileMtime = fs.statSync(USERS_FILE).mtimeMs;
       return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
     } catch (e) {
       console.error('Failed to parse users.json, starting empty store:', e);
@@ -134,9 +188,11 @@ const users = loadUsers();
 
 function saveUsers() {
   ensureDataDir();
-  // Atomic write via temp file rename prevents corrupted JSON if interrupted
   fs.writeFileSync(TMP_FILE, JSON.stringify(users, null, 2), 'utf8');
   fs.renameSync(TMP_FILE, USERS_FILE);
+  try {
+    lastUsersFileMtime = fs.statSync(USERS_FILE).mtimeMs;
+  } catch (_) {}
 }
 
 function getTodayWIB() {
@@ -144,6 +200,7 @@ function getTodayWIB() {
 }
 
 function getUser(userId) {
+  syncUsersFromDisk();
   const id = String(userId);
   const todayWIB = getTodayWIB();
 
@@ -155,11 +212,13 @@ function getUser(userId) {
       lastQuizDate: todayWIB,
       premiumUntil: 0,
     };
+    saveUsers();
   } else if (users[id].lastQuizDate !== todayWIB) {
     users[id].quizCount = 0;
     users[id].explainCount = 0;
     users[id].imageCount = 0;
     users[id].lastQuizDate = todayWIB;
+    saveUsers();
   }
 
   // Defensive defaults for existing user records
@@ -217,14 +276,25 @@ function recordImageUsage(userId) {
 function addPremiumDays(userId, days) {
   const user = getUser(userId);
   const now = Date.now();
-  const durationMs = Number(days) * MS_PER_DAY;
-
+  const d = Number(days);
+  if (isNaN(d) || d <= 0) {
+    user.premiumUntil = 0;
+    saveUsers();
+    return user;
+  }
+  const durationMs = d * MS_PER_DAY;
   if (typeof user.premiumUntil === 'number' && user.premiumUntil > now) {
     user.premiumUntil += durationMs;
   } else {
     user.premiumUntil = now + durationMs;
   }
+  saveUsers();
+  return user;
+}
 
+function revokePremium(userId) {
+  const user = getUser(userId);
+  user.premiumUntil = 0;
   saveUsers();
   return user;
 }
@@ -265,6 +335,7 @@ function deleteUser(userId) {
 }
 
 function getAllUsers() {
+  syncUsersFromDisk();
   const userIds = Object.keys(users);
   return userIds.map((id) => {
     const user = getUser(id);
@@ -350,6 +421,7 @@ module.exports = {
   recordImageUsage,
   upgradeUser,
   addPremiumDays,
+  revokePremium,
   resetUserQuota,
   deleteUser,
   getAllUsers,

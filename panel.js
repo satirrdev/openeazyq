@@ -978,6 +978,7 @@ function getDashboardHtml() {
           <input type="number" id="premiumDays" min="1" max="3650" value="30" required>
         </div>
         <div class="modal-actions">
+          <button type="button" class="btn btn-danger btn-sm" onclick="handleRevokePremium()" style="margin-right:auto;">Revoke Premium</button>
           <button type="button" class="btn btn-secondary" onclick="closeModal('premiumModal')">Cancel</button>
           <button type="submit" class="btn btn-primary">Apply Premium</button>
         </div>
@@ -1483,8 +1484,9 @@ function getDashboardHtml() {
     }
 
     function openPremiumModal(userId) {
+      const u = globalUsers.find(item => String(item.userId) === String(userId)) || {};
       document.getElementById('premiumUserId').value = userId;
-      document.getElementById('premiumUserIdText').textContent = userId;
+      document.getElementById('premiumUserIdText').textContent = userId + (u.isPremium ? ' (Active Premium)' : ' (Free)');
       document.getElementById('premiumDays').value = 30;
       openModal('premiumModal');
     }
@@ -1505,16 +1507,37 @@ function getDashboardHtml() {
           loadUsersData();
           loadOverviewData();
         } else {
-          showToast('Failed to extend premium days', 'error');
+          const data = await res.json().catch(() => ({}));
+          showToast(data.error || 'Failed to extend premium days', 'error');
         }
       } catch (err) {
         showToast('Network error while applying premium', 'error');
       }
     }
 
+    async function handleRevokePremium() {
+      const userId = document.getElementById('premiumUserId').value;
+      if (!confirm('Revoke premium subscription for user ' + userId + '?')) return;
+      try {
+        const res = await fetch('/api/users/' + userId + '/premium', {
+          method: 'DELETE'
+        });
+        if (res.ok) {
+          closeModal('premiumModal');
+          showToast('Revoked premium for user ' + userId, 'info');
+          loadUsersData();
+          loadOverviewData();
+        } else {
+          const data = await res.json().catch(() => ({}));
+          showToast(data.error || 'Failed to revoke premium', 'error');
+        }
+      } catch (err) {
+        showToast('Network error while revoking premium', 'error');
+      }
+    }
+
     function openCustomLimitModal(userId) {
-      const u = globalUsers.find(item => item.userId === userId);
-      if (!u) return;
+      const u = globalUsers.find(item => String(item.userId) === String(userId)) || {};
       document.getElementById('customLimitUserId').value = userId;
       document.getElementById('customLimitUserIdText').textContent = userId;
       const c = u.customLimits || {};
@@ -1542,8 +1565,10 @@ function getDashboardHtml() {
           closeModal('customLimitModal');
           showToast('Custom limits updated for user ' + userId, 'success');
           loadUsersData();
+          loadOverviewData();
         } else {
-          showToast('Failed to save user limits', 'error');
+          const data = await res.json().catch(() => ({}));
+          showToast(data.error || 'Failed to save user limits', 'error');
         }
       } catch (err) {
         showToast('Network error while saving user limits', 'error');
@@ -1553,14 +1578,20 @@ function getDashboardHtml() {
     async function handleResetUserLimitToDefault() {
       const userId = document.getElementById('customLimitUserId').value;
       try {
-        await fetch('/api/users/' + userId + '/limits', {
+        const res = await fetch('/api/users/' + userId + '/limits', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(null)
         });
-        closeModal('customLimitModal');
-        showToast('Reset user ' + userId + ' to global limits', 'info');
-        loadUsersData();
+        if (res.ok) {
+          closeModal('customLimitModal');
+          showToast('Reset user ' + userId + ' to global limits', 'info');
+          loadUsersData();
+          loadOverviewData();
+        } else {
+          const data = await res.json().catch(() => ({}));
+          showToast(data.error || 'Failed to reset user limits', 'error');
+        }
       } catch (err) {
         showToast('Failed to reset user limits', 'error');
       }
@@ -1569,13 +1600,19 @@ function getDashboardHtml() {
     async function resetUserQuotaItem(userId) {
       if (!confirm('Reset all daily usage counters for user ' + userId + ' to 0?')) return;
       try {
-        await fetch('/api/users/' + userId + '/reset', {
+        const res = await fetch('/api/users/' + userId + '/reset', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ type: 'all' })
         });
-        showToast('User quota counters reset to 0', 'success');
-        loadUsersData();
+        if (res.ok) {
+          showToast('User quota counters reset to 0', 'success');
+          loadUsersData();
+          loadOverviewData();
+        } else {
+          const data = await res.json().catch(() => ({}));
+          showToast(data.error || 'Failed to reset user quota', 'error');
+        }
       } catch (err) {
         showToast('Failed to reset user quota', 'error');
       }
@@ -1590,7 +1627,8 @@ function getDashboardHtml() {
           loadUsersData();
           loadOverviewData();
         } else {
-          showToast('Failed to delete user', 'error');
+          const data = await res.json().catch(() => ({}));
+          showToast(data.error || 'Failed to delete user', 'error');
         }
       } catch (err) {
         showToast('Network error while deleting user', 'error');
@@ -1829,17 +1867,27 @@ async function handleApi(req, res, pathname) {
       }
     }
 
-    if (action === 'premium' && req.method === 'POST') {
-      try {
-        const body = await parseJsonBody(req);
-        const days = Number(body.days);
-        if (isNaN(days) || days <= 0) {
-          return sendJson(res, 400, { error: 'Parameter days must be a positive number' });
-        }
-        const updatedUser = store.addPremiumDays(targetUserId, days);
+    if (action === 'premium') {
+      if (req.method === 'DELETE') {
+        const updatedUser = store.revokePremium(targetUserId);
         return sendJson(res, 200, updatedUser);
-      } catch (err) {
-        return sendJson(res, 400, { error: err.message });
+      }
+      if (req.method === 'POST') {
+        try {
+          const body = await parseJsonBody(req);
+          if (body && (body.revoke === true || body.days === 0 || body.days === '0')) {
+            const updatedUser = store.revokePremium(targetUserId);
+            return sendJson(res, 200, updatedUser);
+          }
+          const days = Number(body.days);
+          if (isNaN(days) || days <= 0) {
+            return sendJson(res, 400, { error: 'Parameter days must be a positive number' });
+          }
+          const updatedUser = store.addPremiumDays(targetUserId, days);
+          return sendJson(res, 200, updatedUser);
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
       }
     }
 

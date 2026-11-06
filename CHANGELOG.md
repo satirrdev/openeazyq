@@ -3,6 +3,14 @@
 All notable changes to GampangBot are documented in this file.
 This project adheres to Semantic Versioning.
 
+## [v1.0.0a] - 2026-11-06
+
+### Fixed
+- Quota accounting across explanation requests: mapped accounting directly to user ID rather than chat ID.
+- Telegram explanation routing: added `/explain`, `/jelasin`, and `/jelaskan` commands alongside prefix pattern matching for direct conceptual tutor queries.
+- Users & Quota panel governance: implemented Premium subscription revocation, custom daily limit clearing back to defaults, zero-quota support, and live quota resets with UI toast notifications.
+- Multi-process persistence sync: added file modification time tracking in store to sync live disk state seamlessly across concurrent processes.
+
 ## [v1.0.0] - 2026-11-04
 
 ### Highlights
