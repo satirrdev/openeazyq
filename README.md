@@ -1,6 +1,6 @@
 # OpenEazyQ / GampangBot
 
-[![Version](https://img.shields.io/badge/version-1.0.0c-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.0d-blue.svg)](CHANGELOG.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-%40GampanginBot-2CA5E0.svg?logo=telegram&logoColor=white)](https://t.me/GampanginBot)

@@ -174,6 +174,7 @@ async function runTests() {
 
     assert.strictEqual(panel.getClientIp({ headers: { 'x-forwarded-for': '1.2.3.4, 5.6.7.8' } }), '1.2.3.4');
     assert.strictEqual(panel.getClientIp({ socket: { remoteAddress: '127.0.0.1' } }), '127.0.0.1');
+    assert.strictEqual(panel.getClientIp({ headers: { 'x-forwarded-for': '1.2.3.4' }, socket: { remoteAddress: '203.0.113.195' } }), '203.0.113.195');
     console.log('  Passed Test 3b.\n');
 
     // 4. Global limit customization API test (1 to infinity)

@@ -1390,6 +1390,27 @@ function registerAllSuites() {
       }
     });
 
+    test('7.1b downloadTelegramImageAsBase64 rejects oversized images (>5MB)', async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = async () => ({
+          ok: true,
+          status: 200,
+          headers: { get: (name) => name === 'content-length' ? '10485760' : 'image/png' },
+          arrayBuffer: async () => Buffer.alloc(10),
+        });
+        const mockBotInstance = {
+          getFileLink: async (fileId) => `https://api.telegram.org/file/bot/${fileId}.png`,
+        };
+        await assert.rejects(
+          () => downloadTelegramImageAsBase64(mockBotInstance, 'huge_file', 'image/png'),
+          /Image file is too large/
+        );
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
     test('7.2 bot.on message with photo saves imageBase64 & caption and shows CHOICE_KEYBOARD', async () => {
       const originalFetch = global.fetch;
       try {

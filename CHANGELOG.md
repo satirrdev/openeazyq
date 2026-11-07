@@ -3,6 +3,16 @@
 All notable changes to GampangBot are documented in this file.
 This project adheres to Semantic Versioning.
 
+## [v1.0.0d] - 2026-11-08
+
+### Security & Hardening
+- **Admin Panel Header Spoofing Fix:** Hardened `getClientIp` in `panel.js` to only trust `X-Forwarded-For` under explicit proxy flags (`TRUST_PROXY=true`), test environments, or loopback interfaces, preventing IP-spoofing brute-force rate limit bypasses.
+- **LLM Token Drain Protection:** Enforced `MAX_HINTS_PER_QUIZ = 2` cap and input truncation (500 chars) on `handleHint` in `bot.js`, with in-flight concurrency locks to prevent API token exhaustion attacks.
+- **Group Chat State Isolation & Anti-Hijacking:** Attached `quizUserId` to active quizzes; blocked other group members from hijacking answer buttons (`ANS_*`) and silenced unsolicited background group chatter from invoking LLM hint calls.
+- **SSRF DNS Rebinding Prevention:** Added asynchronous pre-flight DNS resolution checks via `dns.lookup` in `providers.js` and blocked dangerous DNS rebinding domains (`.nip.io`, `.sslip.io`, `.local`, `.internal`) prior to provider probe calls.
+- **Image Download OOM Guard:** Set a strict 5MB payload ceiling (`MAX_IMAGE_BYTES`) on `downloadTelegramImageAsBase64` via `Content-Length` inspection and buffer size checks to eliminate Out-Of-Memory denial-of-service risks.
+- **TOCTOU Quota Reservation:** Introduced in-flight quota reservations (`reserveQuota`, `releaseQuota`) in `store.js` across quiz, explain, and image operations to prevent concurrent quota bypassing.
+
 ## [v1.0.0c] - 2026-11-08
 
 ### Added

@@ -230,25 +230,49 @@ function getUser(userId) {
   return users[id];
 }
 
+const pendingQuiz = new Map();
+const pendingExplain = new Map();
+const pendingImage = new Map();
+
+function reserveQuota(userId, type = 'quiz') {
+  const map = type === 'quiz' ? pendingQuiz : (type === 'explain' ? pendingExplain : pendingImage);
+  const id = String(userId);
+  map.set(id, (map.get(id) || 0) + 1);
+}
+
+function releaseQuota(userId, type = 'quiz') {
+  const map = type === 'quiz' ? pendingQuiz : (type === 'explain' ? pendingExplain : pendingImage);
+  const id = String(userId);
+  const cur = map.get(id) || 0;
+  if (cur <= 1) {
+    map.delete(id);
+  } else {
+    map.set(id, cur - 1);
+  }
+}
+
 function canTakeQuiz(userId) {
   const user = getUser(userId);
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
   const limit = getQuizLimit(userId);
-  return isPremium || limit === Infinity || user.quizCount < limit;
+  const inFlight = pendingQuiz.get(String(userId)) || 0;
+  return isPremium || limit === Infinity || (user.quizCount + inFlight) < limit;
 }
 
 function canExplain(userId) {
   const user = getUser(userId);
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
   const limit = getExplainLimit(userId);
-  return isPremium || limit === Infinity || user.explainCount < limit;
+  const inFlight = pendingExplain.get(String(userId)) || 0;
+  return isPremium || limit === Infinity || (user.explainCount + inFlight) < limit;
 }
 
 function canUploadImage(userId) {
   const user = getUser(userId);
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
   const limit = getImageLimit(userId);
-  return isPremium || limit === Infinity || user.imageCount < limit;
+  const inFlight = pendingImage.get(String(userId)) || 0;
+  return isPremium || limit === Infinity || (user.imageCount + inFlight) < limit;
 }
 
 function getUserLanguage(userId) {
@@ -265,6 +289,7 @@ function setUserLanguage(userId, lang) {
 }
 
 function recordQuizUsage(userId) {
+  releaseQuota(userId, 'quiz');
   const user = getUser(userId);
   user.quizCount += 1;
   user.lastQuizDate = getTodayWIB();
@@ -273,6 +298,7 @@ function recordQuizUsage(userId) {
 }
 
 function recordExplainUsage(userId) {
+  releaseQuota(userId, 'explain');
   const user = getUser(userId);
   user.explainCount += 1;
   user.lastQuizDate = getTodayWIB();
@@ -281,6 +307,7 @@ function recordExplainUsage(userId) {
 }
 
 function recordImageUsage(userId) {
+  releaseQuota(userId, 'image');
   const user = getUser(userId);
   user.imageCount += 1;
   user.lastQuizDate = getTodayWIB();
@@ -431,6 +458,8 @@ module.exports = {
   canTakeQuiz,
   canExplain,
   canUploadImage,
+  reserveQuota,
+  releaseQuota,
   recordQuizUsage,
   recordExplainUsage,
   recordImageUsage,

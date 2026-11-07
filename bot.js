@@ -5,6 +5,8 @@ const {
   canTakeQuiz,
   canExplain,
   canUploadImage,
+  reserveQuota,
+  releaseQuota,
   recordQuizUsage,
   recordExplainUsage,
   recordImageUsage,
@@ -210,6 +212,8 @@ async function sendSmart(bot, chatId, text, opts = {}) {
   return lastSent;
 }
 
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB cap
+
 // Download Telegram photo or document file and convert to Base64 data URL
 async function downloadTelegramImageAsBase64(bot, fileId, defaultMime = 'image/jpeg') {
   const fileLink = await bot.getFileLink(fileId);
@@ -220,8 +224,17 @@ async function downloadTelegramImageAsBase64(bot, fileId, defaultMime = 'image/j
     if (!res.ok) {
       throw new Error(`Failed to download Telegram file (${res.status})`);
     }
-    const contentType = res.headers.get('content-type') || defaultMime;
+    const rawLen = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-length') : null;
+    const contentLength = rawLen ? parseInt(rawLen, 10) : NaN;
+    if (!isNaN(contentLength) && contentLength > MAX_IMAGE_BYTES) {
+      controller.abort();
+      throw new Error('Image file is too large (maximum 5MB)');
+    }
+    const contentType = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || defaultMime;
     const arrayBuffer = await res.arrayBuffer();
+    if (arrayBuffer && arrayBuffer.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error('Image file is too large (maximum 5MB)');
+    }
     const base64Data = Buffer.from(arrayBuffer).toString('base64');
     return `data:${contentType};base64,${base64Data}`;
   } finally {
@@ -559,12 +572,28 @@ function register(bot) {
 
     // Quiz is locked while waiting for an answer: never change the question
     if (s.state === 'AWAITING_ANSWER' && s.quiz) {
+      const isGroup = msg.chat && (msg.chat.type === 'group' || msg.chat.type === 'supergroup');
+      if (isGroup) {
+        const isOwner = !s.quizUserId || String(userId) === String(s.quizUserId);
+        const isReplyToBot = msg.reply_to_message && msg.reply_to_message.from && msg.reply_to_message.from.is_bot;
+        if (!isOwner || !isReplyToBot) {
+          return;
+        }
+      }
       if (isImage) {
         bot.sendMessage(chatId, t(lang, 'quiz_locked'));
         return;
       }
-      handleHint(chatId, msg.text);
+      handleHint(chatId, msg.text, userId);
       return;
+    }
+
+    const isGroup = msg.chat && (msg.chat.type === 'group' || msg.chat.type === 'supergroup');
+    if (isGroup) {
+      const isReplyToBot = msg.reply_to_message && msg.reply_to_message.from && msg.reply_to_message.from.is_bot;
+      if (!isReplyToBot) {
+        return;
+      }
     }
 
     if (isImage) {
@@ -747,6 +776,16 @@ function register(bot) {
       // Answer click: A/B/C/D
       if (data.startsWith('ANS_')) {
         const answer = data.slice(4); // 'A'..'D'
+
+        // Check if group quiz belongs to another user
+        if (s.quizUserId && String(userId) !== String(s.quizUserId)) {
+          await bot.answerCallbackQuery(query.id, {
+            text: lang === 'id' ? 'Soal ini untuk user lain!' : 'This quiz belongs to another user!',
+            show_alert: true,
+          }).catch(() => {});
+          return;
+        }
+
         await bot.answerCallbackQuery(query.id);
 
         if (s.state !== 'AWAITING_ANSWER' || !s.quiz) {
@@ -759,7 +798,7 @@ function register(bot) {
         const isCorrect = answer === quiz.correct_answer;
 
         // Mark quiz as answered (block double clicks)
-        setState(chatId, { state: 'QUIZ_DONE' });
+        setState(chatId, { state: 'QUIZ_DONE', quizUserId: null, hintCount: 0 });
 
         const emoji = isCorrect ? '✅' : '❌';
         const verdict = isCorrect ? t(lang, 'quiz_correct') : t(lang, 'quiz_incorrect');
@@ -794,12 +833,28 @@ function register(bot) {
   });
 
   // Refuse quiz changes and provide a clue without leaking the answer
-  async function handleHint(chatId, userMessage) {
+  const MAX_HINTS_PER_QUIZ = 2;
+
+  async function handleHint(chatId, userMessage, userId = null) {
     const s = getState(chatId);
     const quiz = s.quiz;
-    const uid = chatId;
+    const uid = userId || chatId;
     const lang = getUserLanguage(uid);
     const isEn = lang === 'en';
+
+    if (s.hintActive) {
+      bot.sendMessage(chatId, t(lang, 'processing'));
+      return;
+    }
+
+    const currentHints = s.hintCount || 0;
+    if (currentHints >= MAX_HINTS_PER_QUIZ) {
+      await sendSmart(bot, chatId, t(lang, 'hint_limit_reached'));
+      return;
+    }
+
+    s.hintActive = true;
+    s.hintCount = currentHints + 1;
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
     try {
@@ -808,13 +863,14 @@ function register(bot) {
         .join('\n');
       const MAX_CHARS = 1500;
       const material = (s.material || '').slice(0, MAX_CHARS);
+      const cleanMsg = (userMessage || '').trim().slice(0, 500);
       const prompt = isEn
         ? `Material:\n${material}\n\n` +
           `LOCKED quiz question (DO NOT change):\n${quiz.question}\n\nOptions:\n${optionsText}\n\n` +
-          `User message: "${userMessage}"`
+          `User message: "${cleanMsg}"`
         : `Materi:\n${material}\n\n` +
           `Pertanyaan kuis yang DIKUNCI (JANGAN diubah):\n${quiz.question}\n\nPilihan:\n${optionsText}\n\n` +
-          `Pesan user: "${userMessage}"`;
+          `Pesan user: "${cleanMsg}"`;
       const reply = await ask(prompt, getHintPrompt(lang), {
         primaryModel: MODEL_DEEPSEEK,
         fallbackModel: MODEL_MIMO,
@@ -827,6 +883,7 @@ function register(bot) {
       console.error('Hint error:', e);
       await sendSmart(bot, chatId, t(lang, 'hint_refusal'));
     } finally {
+      s.hintActive = false;
       clearInterval(typing);
     }
   }
@@ -844,6 +901,7 @@ function register(bot) {
 
     const s = getState(chatId);
     setState(chatId, { state: 'EXPLAIN_ACTIVE' });
+    reserveQuota(uid, 'explain');
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
     try {
@@ -863,6 +921,7 @@ function register(bot) {
       setState(chatId, { state: 'IDLE' });
       await sendSmart(bot, chatId, cleanMarkdown(reply));
     } catch (e) {
+      releaseQuota(uid, 'explain');
       console.error('Follow-up error:', e);
       setState(chatId, { state: 'IDLE' });
       bot.sendMessage(chatId, t(lang, 'ai_busy')).catch(() => {});
@@ -876,6 +935,7 @@ function register(bot) {
     const lang = getUserLanguage(uid);
     const s = getState(chatId);
     setState(chatId, { state: 'QUIZ_ACTIVE' });
+    reserveQuota(uid, 'quiz');
     bot.sendMessage(chatId, t(lang, 'generating_quiz'));
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
@@ -890,8 +950,11 @@ function register(bot) {
         quiz,
         messageId: sent.message_id,
         imageBase64: null,
+        quizUserId: uid,
+        hintCount: 0,
       });
     } catch (e) {
+      releaseQuota(uid, 'quiz');
       console.error('Quiz generation error:', e);
       setState(chatId, { state: 'IDLE', quiz: null, imageBase64: null });
       bot.sendMessage(chatId, t(lang, 'ai_busy')).catch(() => {});
@@ -904,6 +967,7 @@ function register(bot) {
     const uid = userId || chatId;
     const lang = getUserLanguage(uid);
     setState(chatId, { state: 'EXPLAIN_ACTIVE' });
+    reserveQuota(uid, 'explain');
     bot.sendMessage(chatId, t(lang, 'explaining'));
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
@@ -960,6 +1024,7 @@ function register(bot) {
       recordExplainUsage(uid);
       setState(chatId, { state: 'IDLE', imageBase64: null });
     } catch (e) {
+      releaseQuota(uid, 'explain');
       console.error('Explain error:', e);
       setState(chatId, { state: 'IDLE', imageBase64: null });
       bot.sendMessage(chatId, t(lang, 'ai_busy')).catch(() => {});

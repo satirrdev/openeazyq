@@ -1714,11 +1714,15 @@ function getDashboardHtml() {
 }
 
 function getClientIp(req) {
+  const remote = (req && req.socket && req.socket.remoteAddress) || '';
   const forwarded = req && req.headers && req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
+  const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  const trustProxy = process.env.TRUST_PROXY === 'true' || process.env.NODE_ENV === 'test' || isLoopback || !remote;
+
+  if (trustProxy && typeof forwarded === 'string' && forwarded.length > 0) {
     return forwarded.split(',')[0].trim();
   }
-  return (req && req.socket && req.socket.remoteAddress) || '';
+  return remote;
 }
 
 function handleAuthCheck(req, res) {

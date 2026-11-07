@@ -1,6 +1,6 @@
 {
   "name": "gampangbot",
-  "version": "1.0.0c",
+  "version": "1.0.0d",
   "description": "GampangBot: AI exam quiz assistant on Telegram",
   "main": "index.js",
   "scripts": {

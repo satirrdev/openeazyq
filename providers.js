@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns').promises;
 
 const DATA_DIR = path.join(__dirname, 'data');
 const PROVIDERS_FILE = path.join(DATA_DIR, 'providers.json');
@@ -106,6 +107,7 @@ function isPrivateOrLoopbackHost(hostname) {
   if (h === 'metadata.google.internal' || h.endsWith('.metadata.google.internal')) return true;
   if (h === 'metadata' || h === 'instance-data') return true;
   if (h === '0.0.0.0') return true;
+  if (h.endsWith('.nip.io') || h.endsWith('.sslip.io') || h.endsWith('.local') || h.endsWith('.internal')) return true;
 
   const ip4 = parseIPv4(h);
   if (ip4 !== null) {
@@ -386,6 +388,31 @@ async function probeProvider(target) {
   let latencyMs = 0;
 
   try {
+    const bypass = process.env.NODE_ENV === 'test' || process.env.ALLOW_PRIVATE_AI_HOSTS === 'true';
+    if (!bypass) {
+      const urlObj = new URL(url);
+      if (isPrivateOrLoopbackHost(urlObj.hostname)) {
+        throw new Error('SSRF blocked: host is private or loopback');
+      }
+      try {
+        const records = await dns.lookup(urlObj.hostname, { all: true });
+        for (const rec of records) {
+          if (rec.family === 4) {
+            const ip4 = parseIPv4(rec.address);
+            if (ip4 !== null && isPrivateIPv4(ip4)) {
+              throw new Error(`SSRF blocked: ${urlObj.hostname} resolves to private IP (${rec.address})`);
+            }
+          } else if (rec.family === 6) {
+            if (isPrivateIPv6(rec.address)) {
+              throw new Error(`SSRF blocked: ${urlObj.hostname} resolves to private IPv6 (${rec.address})`);
+            }
+          }
+        }
+      } catch (dnsErr) {
+        if (dnsErr.message && dnsErr.message.startsWith('SSRF blocked:')) throw dnsErr;
+      }
+    }
+
     const res = await fetch(url, {
       method: 'POST',
       headers,
