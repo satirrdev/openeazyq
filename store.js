@@ -211,6 +211,7 @@ function getUser(userId) {
       imageCount: 0,
       lastQuizDate: todayWIB,
       premiumUntil: 0,
+      language: 'en',
     };
     saveUsers();
   } else if (users[id].lastQuizDate !== todayWIB) {
@@ -224,6 +225,7 @@ function getUser(userId) {
   // Defensive defaults for existing user records
   if (typeof users[id].explainCount !== 'number') users[id].explainCount = 0;
   if (typeof users[id].imageCount !== 'number') users[id].imageCount = 0;
+  if (!users[id].language) users[id].language = 'en';
 
   return users[id];
 }
@@ -247,6 +249,19 @@ function canUploadImage(userId) {
   const isPremium = typeof user.premiumUntil === 'number' && user.premiumUntil > Date.now();
   const limit = getImageLimit(userId);
   return isPremium || limit === Infinity || user.imageCount < limit;
+}
+
+function getUserLanguage(userId) {
+  const user = getUser(userId);
+  return user.language === 'id' ? 'id' : 'en';
+}
+
+function setUserLanguage(userId, lang) {
+  const cleanLang = String(lang).toLowerCase() === 'id' ? 'id' : 'en';
+  const user = getUser(userId);
+  user.language = cleanLang;
+  saveUsers();
+  return cleanLang;
 }
 
 function recordQuizUsage(userId) {
@@ -426,4 +441,6 @@ module.exports = {
   deleteUser,
   getAllUsers,
   getUserQuota,
+  getUserLanguage,
+  setUserLanguage,
 };

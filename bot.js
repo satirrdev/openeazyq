@@ -11,6 +11,8 @@ const {
   upgradeUser,
   getUserQuota,
   getAllUsers,
+  getUserLanguage,
+  setUserLanguage,
   DAILY_EXPLAIN_LIMIT,
   DAILY_IMAGE_LIMIT,
 } = store;
@@ -23,6 +25,13 @@ const {
   buildQuizKeyboard,
   buildQuestionText,
 } = require('./quiz');
+const {
+  t,
+  getQuizPrompt,
+  getExplainPrompt,
+  getHintPrompt,
+} = require('./i18n');
+const { responseCache } = require('./cache');
 const { performBackup } = require('./backup');
 
 const AI_BUSY_MSG = ERROR_MSG;
@@ -116,12 +125,31 @@ function clearHistory(chatId) {
   s.history = [];
 }
 
-// Ask what the user wants done with their material (per plan: ask each time)
+function getChoiceKeyboard(lang = 'en') {
+  return {
+    inline_keyboard: [
+      [
+        { text: t(lang, 'btn_quiz'), callback_data: 'CHOICE_QUIZ' },
+        { text: t(lang, 'btn_explain'), callback_data: 'CHOICE_EXPLAIN' },
+      ],
+    ],
+  };
+}
+
 const CHOICE_KEYBOARD = {
   inline_keyboard: [
     [
       { text: '📚 Bikin Kuis', callback_data: 'CHOICE_QUIZ' },
       { text: '🧠 Jelasin Materi', callback_data: 'CHOICE_EXPLAIN' },
+    ],
+  ],
+};
+
+const LANGUAGE_KEYBOARD = {
+  inline_keyboard: [
+    [
+      { text: '🇬🇧 English', callback_data: 'LANG_en' },
+      { text: '🇮🇩 Bahasa Indonesia', callback_data: 'LANG_id' },
     ],
   ],
 };
@@ -209,6 +237,7 @@ function register(bot) {
     { command: 'start', description: 'Mulai bot & panduan belajar' },
     { command: 'quiz', description: 'Buat kuis pilihan ganda dari materi' },
     { command: 'reset', description: 'Reset ingatan percakapan & materi' },
+    { command: 'language', description: 'Change bot language / Ubah bahasa bot' },
     { command: 'ceklimit', description: 'Cek sisa limit kuis harian' },
     { command: 'iduser', description: 'Lihat ID Telegram untuk upgrade' },
   ];
@@ -218,20 +247,30 @@ function register(bot) {
     });
   }
 
+  bot.onText(/^\/language(?:@\w+)?$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from ? msg.from.id : chatId;
+    const lang = getUserLanguage(userId);
+    bot.sendMessage(chatId, t(lang, 'language_select'), {
+      reply_markup: LANGUAGE_KEYBOARD,
+    });
+  });
+
   bot.onText(/^\/quiz(?:@\w+)?(?:\s+([\s\S]*))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from ? msg.from.id : chatId;
+    const lang = getUserLanguage(userId);
     const s = getState(chatId);
 
     // Concurrency check
     if (s.state === 'QUIZ_ACTIVE' || s.state === 'EXPLAIN_ACTIVE') {
-      bot.sendMessage(chatId, 'Sabar ya, lagi diproses nih... ⏳');
+      bot.sendMessage(chatId, t(lang, 'processing'));
       return;
     }
 
     // Locked quiz in progress check
     if (s.state === 'AWAITING_ANSWER' && s.quiz) {
-      bot.sendMessage(chatId, 'Nope, soalnya udah dikunci 🔒 Selesaikan dulu kuis yang lagi aktif ya!');
+      bot.sendMessage(chatId, t(lang, 'quiz_locked'));
       return;
     }
 
@@ -239,7 +278,7 @@ function register(bot) {
     if (!canTakeQuiz(userId)) {
       bot.sendMessage(
         chatId,
-        'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+        t(lang, 'quota_quiz_exhausted')
       );
       return;
     }
@@ -284,29 +323,30 @@ function register(bot) {
     await sendSmart(
       bot,
       chatId,
-      'Materinya belum ada nih! 📚\nKirim catatan atau materi kamu dulu, atau langsung ketik:\n`/quiz <materi kamu>`'
+      t(lang, 'empty_quiz_prompt')
     );
   });
 
   bot.onText(/^\/(?:explain|jelasin|jelaskan)(?:@\w+)?(?:\s+([\s\S]*))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from ? msg.from.id : chatId;
+    const lang = getUserLanguage(userId);
     const s = getState(chatId);
 
     if (s.state === 'QUIZ_ACTIVE' || s.state === 'EXPLAIN_ACTIVE') {
-      bot.sendMessage(chatId, 'Sabar ya, lagi diproses nih... ⏳');
+      bot.sendMessage(chatId, t(lang, 'processing'));
       return;
     }
 
     if (s.state === 'AWAITING_ANSWER' && s.quiz) {
-      bot.sendMessage(chatId, 'Nope, soalnya udah dikunci 🔒 Selesaikan dulu kuis yang lagi aktif ya!');
+      bot.sendMessage(chatId, t(lang, 'quiz_locked'));
       return;
     }
 
     if (!canExplain(userId)) {
       bot.sendMessage(
         chatId,
-        'Limit Penjelasan kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+        t(lang, 'quota_explain_exhausted')
       );
       return;
     }
@@ -342,12 +382,14 @@ function register(bot) {
     await sendSmart(
       bot,
       chatId,
-      'Materinya belum ada nih! 🧠\nKirim materi atau topik yang mau dijelasin, atau langsung ketik:\n`/explain <materi kamu>`'
+      t(lang, 'empty_quiz_prompt')
     );
   });
 
   bot.onText(/\/reset/, (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from ? msg.from.id : chatId;
+    const lang = getUserLanguage(userId);
     clearHistory(chatId);
     setState(chatId, {
       state: 'IDLE',
@@ -358,41 +400,39 @@ function register(bot) {
     });
     bot.sendMessage(
       chatId,
-      'Memori obrolan berhasil di-reset! Kirim materi atau pertanyaan baru yuk 🚀'
+      t(lang, 'reset_done')
     );
   });
 
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from ? msg.from.id : chatId;
+    const lang = getUserLanguage(userId);
     clearHistory(chatId);
     setState(chatId, { state: 'IDLE', quiz: null, messageId: null, imageBase64: null });
     bot.sendMessage(
       chatId,
-      'Hai! 👋 Gw *GampangBot*, asisten belajar kompetitiflu.\n\n' +
-        'Kirim aja materi belajar, catatan, gambar/foto materi, atau syllabus ke sini.\n' +
-        'Nanti gw bisa:\n' +
-        '📚 Bikinin kuis pilihan ganda\n' +
-        '🧠 Jelasin materi pake gaya anak SD (santai & gampang)\n\n' +
-        'Gaskeun, kirim materinya! 🚀',
+      t(lang, 'start'),
       { parse_mode: 'Markdown' }
     );
   });
 
   bot.onText(/\/ceklimit/, async (msg) => {
     const userId = msg.from ? msg.from.id : msg.chat.id;
+    const lang = getUserLanguage(userId);
     const quota = getUserQuota(userId);
 
     if (quota.isPremium) {
-      const expiryDate = new Date(quota.premiumUntil).toLocaleString('id-ID', {
+      const expiryDate = new Date(quota.premiumUntil).toLocaleString(lang === 'id' ? 'id-ID' : 'en-US', {
         timeZone: 'Asia/Jakarta',
       });
       await sendSmart(
         bot,
         msg.chat.id,
-        `📊 *Status Limit Kamu*\n\n` +
-        `Status: ⭐ Premium (Unlimited Kuis, Penjelasan, & Gambar)\n` +
-        `Aktif sampai: ${expiryDate} WIB\n\n` +
-        `Gaskeun latihan sepuasnya tanpa batas harian! 🚀`
+        `${t(lang, 'ceklimit_title')}\n\n` +
+        `${t(lang, 'ceklimit_status_premium')}\n` +
+        `${t(lang, 'ceklimit_expires', { date: expiryDate })} WIB\n\n` +
+        `${lang === 'id' ? 'Gaskeun latihan sepuasnya tanpa batas harian! 🚀' : 'Enjoy unlimited practice without daily limits! 🚀'}`
       );
       return;
     }
@@ -404,30 +444,33 @@ function register(bot) {
     const imageRemaining = quota.image ? quota.image.remaining : 5;
     const imageTotal = quota.image ? quota.image.total : 5;
 
-    const quizDisplay = quizRemaining === 0 ? `0/${quizTotal} (Habis)` : `${quizRemaining}/${quizTotal}`;
-    const explainDisplay = explainRemaining === 0 ? `0/${explainTotal} (Habis)` : `${explainRemaining}/${explainTotal}`;
-    const imageDisplay = imageRemaining === 0 ? `0/${imageTotal} (Habis)` : `${imageRemaining}/${imageTotal}`;
+    const exhaustedSuffix = t(lang, 'ceklimit_exhausted_suffix');
+    const quizDisplay = quizRemaining === 0 ? `0/${quizTotal}${exhaustedSuffix}` : `${quizRemaining}/${quizTotal}`;
+    const explainDisplay = explainRemaining === 0 ? `0/${explainTotal}${exhaustedSuffix}` : `${explainRemaining}/${explainTotal}`;
+    const imageDisplay = imageRemaining === 0 ? `0/${imageTotal}${exhaustedSuffix}` : `${imageRemaining}/${imageTotal}`;
 
-    let text = `📊 *Status Limit Kamu*\n\n` +
-      `Status: Free\n` +
-      `Sisa Kuis Hari Ini: ${quizDisplay}\n` +
-      `Sisa Penjelasan Hari Ini: ${explainDisplay}\n` +
-      `Sisa Upload Gambar Hari Ini: ${imageDisplay}\n` +
-      `Reset setiap 00:00 WIB\n\n`;
+    let text = `${t(lang, 'ceklimit_title')}\n\n` +
+      `${t(lang, 'ceklimit_status_free')}\n` +
+      `${t(lang, 'ceklimit_quiz', { used: quizDisplay, limit: quizTotal })}\n` +
+      `${t(lang, 'ceklimit_explain', { used: explainDisplay, limit: explainTotal })}\n` +
+      `${t(lang, 'ceklimit_image', { used: imageDisplay, limit: imageTotal })}\n` +
+      `${t(lang, 'ceklimit_reset')}\n\n`;
 
     if (quizRemaining === 0) {
-      text += 'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx';
+      text += t(lang, 'quota_quiz_exhausted');
     } else {
-      text += 'Kirim catatan atau materi kamu ke sini buat mulai kuis! 🚀';
+      text += lang === 'id' ? 'Kirim catatan atau materi kamu ke sini buat mulai kuis! 🚀' : 'Send your notes or study material here to start a quiz! 🚀';
     }
 
     await sendSmart(bot, msg.chat.id, text);
   });
 
   bot.onText(/\/iduser/, (msg) => {
+    const userId = msg.from ? msg.from.id : msg.chat.id;
+    const lang = getUserLanguage(userId);
     bot.sendMessage(
       msg.chat.id,
-      `ID Telegram kamu: \`${msg.from.id}\`\nKirim ID ini ke owner @satirvx buat upgrade kuis.`,
+      t(lang, 'iduser_msg', { userId: msg.from.id }),
       { parse_mode: 'Markdown' }
     );
   });
@@ -495,6 +538,8 @@ function register(bot) {
     if (msg.text && msg.text.startsWith('/')) return;
 
     const chatId = msg.chat.id;
+    const userId = msg.from ? msg.from.id : chatId;
+    const lang = getUserLanguage(userId);
     const s = getState(chatId);
 
     const isPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
@@ -508,14 +553,14 @@ function register(bot) {
 
     // Check if an AI action is already actively computing for this user
     if (s.state === 'QUIZ_ACTIVE' || s.state === 'EXPLAIN_ACTIVE') {
-      bot.sendMessage(chatId, 'Sabar ya, lagi diproses nih... ⏳');
+      bot.sendMessage(chatId, t(lang, 'processing'));
       return;
     }
 
     // Quiz is locked while waiting for an answer: never change the question
     if (s.state === 'AWAITING_ANSWER' && s.quiz) {
       if (isImage) {
-        bot.sendMessage(chatId, 'Nope, soalnya udah dikunci 🔒 Selesaikan dulu kuis yang lagi aktif ya!');
+        bot.sendMessage(chatId, t(lang, 'quiz_locked'));
         return;
       }
       handleHint(chatId, msg.text);
@@ -523,11 +568,10 @@ function register(bot) {
     }
 
     if (isImage) {
-      const userId = msg.from ? msg.from.id : chatId;
       if (!canUploadImage(userId)) {
         bot.sendMessage(
           chatId,
-          'Limit upload Gambar kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+          t(lang, 'quota_image_exhausted')
         );
         return;
       }
@@ -551,12 +595,12 @@ function register(bot) {
 
         bot.sendMessage(
           chatId,
-          'Oke, dapet gambarnya! 📸\nMau gw apain nih?',
-          { reply_markup: CHOICE_KEYBOARD }
+          t(lang, 'received_image'),
+          { reply_markup: getChoiceKeyboard(lang) }
         );
       } catch (err) {
         console.error('Failed to process incoming image:', err.message);
-        bot.sendMessage(chatId, 'Waduh, gagal download gambarnya. Boleh coba kirim ulang? 🙏');
+        bot.sendMessage(chatId, t(lang, 'image_download_failed'));
       }
       return;
     }
@@ -564,14 +608,13 @@ function register(bot) {
     // Text material routing: check if fresh material or contextual follow-up question
     const userText = (msg.text || '').trim();
     const cleanMaterial = userText.slice(0, 1500); // Cap input at 1500 characters
-    const userId = msg.from ? msg.from.id : chatId;
 
-    const isExplicitExplain = /^(?:jelasin|jelaskan|terangkan|apa itu|tolong jelasin|tolong jelaskan)\b/i.test(cleanMaterial);
+    const isExplicitExplain = /^(?:jelasin|jelaskan|terangkan|apa itu|tolong jelasin|tolong jelaskan|explain|what is|please explain)\b/i.test(cleanMaterial);
     if (isExplicitExplain) {
       if (!canExplain(userId)) {
         bot.sendMessage(
           chatId,
-          'Limit Penjelasan kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+          t(lang, 'quota_explain_exhausted')
         );
         return;
       }
@@ -596,8 +639,8 @@ function register(bot) {
 
       bot.sendMessage(
         chatId,
-        'Oke, dapet materinya! 📥\nMau gw apain nih?',
-        { reply_markup: CHOICE_KEYBOARD }
+        t(lang, 'received_material'),
+        { reply_markup: getChoiceKeyboard(lang) }
       );
       return;
     }
@@ -617,22 +660,38 @@ function register(bot) {
 
     bot.sendMessage(
       chatId,
-      'Oke, dapet materinya! 📥\nMau gw apain nih?',
-      { reply_markup: CHOICE_KEYBOARD }
+      t(lang, 'received_material'),
+      { reply_markup: getChoiceKeyboard(lang) }
     );
   });
 
   bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const userId = query.from ? query.from.id : chatId;
+    const lang = getUserLanguage(userId);
     const data = query.data;
     const s = getState(chatId);
 
     try {
+      // Language selection
+      if (data.startsWith('LANG_')) {
+        const targetLang = data.slice(5);
+        setUserLanguage(userId, targetLang);
+        await bot.answerCallbackQuery(query.id, {
+          text: targetLang === 'en' ? 'Language set to English!' : 'Bahasa diatur ke Bahasa Indonesia!',
+        }).catch(() => {});
+        await bot.editMessageReplyMarkup(undefined, {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+        }).catch(() => {});
+        bot.sendMessage(chatId, t(targetLang, 'language_set'));
+        return;
+      }
+
       // Choice: quiz vs explain
       if (data === 'CHOICE_QUIZ' || data === 'CHOICE_EXPLAIN') {
         if (s.state === 'QUIZ_ACTIVE' || s.state === 'EXPLAIN_ACTIVE') {
-          await bot.answerCallbackQuery(query.id, { text: 'Sabar ya, lagi diproses nih... ⏳' });
+          await bot.answerCallbackQuery(query.id, { text: t(lang, 'processing') });
           return;
         }
 
@@ -644,7 +703,7 @@ function register(bot) {
           }).catch(() => {});
           bot.sendMessage(
             chatId,
-            'Limit Quiz kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+            t(lang, 'quota_quiz_exhausted')
           );
           return;
         }
@@ -657,7 +716,7 @@ function register(bot) {
           }).catch(() => {});
           bot.sendMessage(
             chatId,
-            'Limit Penjelasan kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+            t(lang, 'quota_explain_exhausted')
           );
           return;
         }
@@ -666,7 +725,7 @@ function register(bot) {
         const material = s.material;
         const imageBase64 = s.imageBase64;
         if (!material && !imageBase64) {
-          bot.sendMessage(chatId, 'Materinya belum ada nih, kirim dulu dong 🙏');
+          bot.sendMessage(chatId, t(lang, 'material_missing'));
           return;
         }
         // Acknowledge & clear old keyboard
@@ -692,7 +751,7 @@ function register(bot) {
 
         if (s.state !== 'AWAITING_ANSWER' || !s.quiz) {
           // Late or duplicate click: quiz already answered
-          bot.sendMessage(chatId, 'Kuisnya udah kejawab tuh, kirim materi baru yuk! 🔁');
+          bot.sendMessage(chatId, t(lang, 'quiz_done_late'));
           return;
         }
 
@@ -703,11 +762,13 @@ function register(bot) {
         setState(chatId, { state: 'QUIZ_DONE' });
 
         const emoji = isCorrect ? '✅' : '❌';
-        const verdict = isCorrect ? 'BENAR!' : 'KURANG TEPAT!';
+        const verdict = isCorrect ? t(lang, 'quiz_correct') : t(lang, 'quiz_incorrect');
         const header = `${emoji} *${verdict}*`;
         const correctNote = isCorrect
           ? ''
-          : `\n\nJawaban yang bener: *${quiz.correct_answer}. ${quiz.options[quiz.correct_answer]}*`;
+          : t(lang, 'quiz_correct_answer', { letter: quiz.correct_answer, text: quiz.options[quiz.correct_answer] });
+        const yourAnswer = t(lang, 'quiz_your_answer', { letter: answer, text: quiz.options[answer] });
+        const nextPrompt = t(lang, 'quiz_next_prompt');
 
         try {
           await bot.editMessageReplyMarkup(undefined, {
@@ -719,16 +780,16 @@ function register(bot) {
         await sendSmart(
           bot,
           chatId,
-          `${header}\nJawaban lu: *${answer}. ${quiz.options[answer]}*${correctNote}\n\n` +
+          `${header}\n${yourAnswer}${correctNote}\n\n` +
             `💡 _${quiz.explanation}_\n\n` +
-            `Mau lanjut? Kirim materi lain dong! 📥`
+            `${nextPrompt}`
         );
         return;
       }
     } catch (e) {
       console.error('callback_query handler error:', e);
       try { await bot.answerCallbackQuery(query.id, { text: 'Waduh, error. Coba lagi ya 😅' }); } catch (_) {}
-      bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
+      bot.sendMessage(chatId, t(lang, 'ai_busy')).catch(() => {});
     }
   });
 
@@ -736,6 +797,9 @@ function register(bot) {
   async function handleHint(chatId, userMessage) {
     const s = getState(chatId);
     const quiz = s.quiz;
+    const uid = chatId;
+    const lang = getUserLanguage(uid);
+    const isEn = lang === 'en';
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
     try {
@@ -744,11 +808,14 @@ function register(bot) {
         .join('\n');
       const MAX_CHARS = 1500;
       const material = (s.material || '').slice(0, MAX_CHARS);
-      const prompt =
-        `Materi:\n${material}\n\n` +
-        `Pertanyaan kuis yang DIKUNCI (JANGAN diubah):\n${quiz.question}\n\nPilihan:\n${optionsText}\n\n` +
-        `Pesan user: "${userMessage}"`;
-      const reply = await ask(prompt, HINT_SYSTEM_PROMPT, {
+      const prompt = isEn
+        ? `Material:\n${material}\n\n` +
+          `LOCKED quiz question (DO NOT change):\n${quiz.question}\n\nOptions:\n${optionsText}\n\n` +
+          `User message: "${userMessage}"`
+        : `Materi:\n${material}\n\n` +
+          `Pertanyaan kuis yang DIKUNCI (JANGAN diubah):\n${quiz.question}\n\nPilihan:\n${optionsText}\n\n` +
+          `Pesan user: "${userMessage}"`;
+      const reply = await ask(prompt, getHintPrompt(lang), {
         primaryModel: MODEL_DEEPSEEK,
         fallbackModel: MODEL_MIMO,
         maxTokens: 400,
@@ -758,7 +825,7 @@ function register(bot) {
       await sendSmart(bot, chatId, cleanMarkdown(reply));
     } catch (e) {
       console.error('Hint error:', e);
-      await sendSmart(bot, chatId, 'Nope, soalnya udah dikunci 🔒 Fokus jawab yang ada ya, lu pasti bisa! 💪');
+      await sendSmart(bot, chatId, t(lang, 'hint_refusal'));
     } finally {
       clearInterval(typing);
     }
@@ -766,10 +833,11 @@ function register(bot) {
 
   async function handleFollowUp(chatId, question, userId = null) {
     const uid = userId || chatId;
+    const lang = getUserLanguage(uid);
     if (!canExplain(uid)) {
       bot.sendMessage(
         chatId,
-        'Limit Penjelasan kamu sudah habis! Mau upgrade limit untuk persiapan ujian besok? Cuma 10.000 buat 7 Hari, Chat owner @satirvx'
+        t(lang, 'quota_explain_exhausted')
       );
       return;
     }
@@ -780,7 +848,7 @@ function register(bot) {
 
     try {
       const cleanQuestion = (question || '').slice(0, 1500);
-      const reply = await ask(cleanQuestion, EXPLAIN_SYSTEM_PROMPT, {
+      const reply = await ask(cleanQuestion, getExplainPrompt(lang), {
         primaryModel: MODEL_DEEPSEEK,
         fallbackModel: MODEL_MIMO,
         maxTokens: 2500,
@@ -797,7 +865,7 @@ function register(bot) {
     } catch (e) {
       console.error('Follow-up error:', e);
       setState(chatId, { state: 'IDLE' });
-      bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
+      bot.sendMessage(chatId, t(lang, 'ai_busy')).catch(() => {});
     } finally {
       clearInterval(typing);
     }
@@ -805,14 +873,15 @@ function register(bot) {
 
   async function handleQuiz(chatId, userId = null) {
     const uid = userId || chatId;
+    const lang = getUserLanguage(uid);
     const s = getState(chatId);
     setState(chatId, { state: 'QUIZ_ACTIVE' });
-    bot.sendMessage(chatId, 'Oke, lagi gw bikinin soal nih... ⏳');
+    bot.sendMessage(chatId, t(lang, 'generating_quiz'));
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
     try {
-      const quiz = await generateQuiz(s.material, s.imageBase64);
-      const sent = await sendSmart(bot, chatId, buildQuestionText(quiz), {
+      const quiz = await generateQuiz(s.material, s.imageBase64, { lang });
+      const sent = await sendSmart(bot, chatId, buildQuestionText(quiz, lang), {
         reply_markup: buildQuizKeyboard(),
       });
       recordQuizUsage(uid);
@@ -825,7 +894,7 @@ function register(bot) {
     } catch (e) {
       console.error('Quiz generation error:', e);
       setState(chatId, { state: 'IDLE', quiz: null, imageBase64: null });
-      bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
+      bot.sendMessage(chatId, t(lang, 'ai_busy')).catch(() => {});
     } finally {
       clearInterval(typing);
     }
@@ -833,31 +902,55 @@ function register(bot) {
 
   async function handleExplain(chatId, material, imageBase64 = null, userId = null) {
     const uid = userId || chatId;
+    const lang = getUserLanguage(uid);
     setState(chatId, { state: 'EXPLAIN_ACTIVE' });
-    bot.sendMessage(chatId, 'Oke, lagi gw jelasin materinya nih... ⏳');
+    bot.sendMessage(chatId, t(lang, 'explaining'));
     const typing = setInterval(() => bot.sendChatAction(chatId, 'typing').catch(() => {}), 4000);
 
     try {
       const MAX_CHARS = 1500;
       const trimmed = (material || '').slice(0, MAX_CHARS);
+
+      // Check token/response cache
+      const cacheKey = !imageBase64 && trimmed ? responseCache.makeKey('explain', lang, trimmed) : null;
+      if (cacheKey) {
+        const cached = responseCache.get(cacheKey);
+        if (cached) {
+          const userDescriptor = trimmed || '';
+          if (userDescriptor) {
+            appendHistory(chatId, 'user', userDescriptor);
+          }
+          appendHistory(chatId, 'assistant', cached);
+          await sendSmart(bot, chatId, cleanMarkdown(cached));
+          recordExplainUsage(uid);
+          setState(chatId, { state: 'IDLE', imageBase64: null });
+          return;
+        }
+      }
+
       const complexity = classifyComplexity(trimmed);
       const isHeavy = Boolean(imageBase64) || complexity === 'heavy';
       const primaryModel = MODEL_DEEPSEEK;
       const fallbackModel = imageBase64 ? null : MODEL_MIMO;
       const maxTokens = isHeavy ? 3200 : 2500;
       const timeoutMs = isHeavy ? 90000 : 75000;
+      const isEn = lang === 'en';
 
       const prompt = imageBase64 && (!trimmed || !trimmed.trim())
-        ? 'Jelaskan materi yang ada pada gambar berikut secara bertahap dan mudah dipahami.'
-        : `Materi dari user:\n\n${trimmed}`;
+        ? (isEn ? 'Explain the material in the following image step-by-step and concisely.' : 'Jelaskan materi yang ada pada gambar berikut secara bertahap dan mudah dipahami.')
+        : (isEn ? `Study material from user:\n\n${trimmed}` : `Materi dari user:\n\n${trimmed}`);
 
       const explanation = await ask(
         prompt,
-        EXPLAIN_SYSTEM_PROMPT,
+        getExplainPrompt(lang),
         { primaryModel, fallbackModel, maxTokens, timeoutMs, imageBase64, temperature: 0.2 }
       );
 
-      const userDescriptor = trimmed || (imageBase64 ? '[Materi visual/gambar terlampir]' : '');
+      if (cacheKey) {
+        responseCache.set(cacheKey, explanation);
+      }
+
+      const userDescriptor = trimmed || (imageBase64 ? (isEn ? '[Visual/image material attached]' : '[Materi visual/gambar terlampir]') : '');
       if (userDescriptor) {
         appendHistory(chatId, 'user', userDescriptor);
       }
@@ -869,7 +962,7 @@ function register(bot) {
     } catch (e) {
       console.error('Explain error:', e);
       setState(chatId, { state: 'IDLE', imageBase64: null });
-      bot.sendMessage(chatId, AI_BUSY_MSG).catch(() => {});
+      bot.sendMessage(chatId, t(lang, 'ai_busy')).catch(() => {});
     } finally {
       clearInterval(typing);
     }

@@ -1,17 +1,24 @@
 # OpenEazyQ / GampangBot
 
+[![Version](https://img.shields.io/badge/version-1.0.0c-blue.svg)](CHANGELOG.md)
+[![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Telegram Bot](https://img.shields.io/badge/Telegram-%40GampanginBot-2CA5E0.svg?logo=telegram&logoColor=white)](https://t.me/GampanginBot)
+
 > **Open Source Project**  
 > Live Telegram Bot: [@GampanginBot](https://t.me/GampanginBot)
 
 This is an open source codebase powering two companion projects: **GampangBot** and **OpenEazyQ** (accessible live on Telegram at [@GampanginBot](https://t.me/GampanginBot)). While designed out-of-the-box as an exam assistant and conceptual tutor, the architecture is modular and versatile: if configured smartly, this project can readily serve as your personal assistant AI agent on Telegram.
 
-It features an embedded standalone web administration panel, a dynamic multi-provider AI fallback engine supporting both OpenAI and Anthropic standards, and an automated zero-dependency PKZIP backup system.
+It features an embedded standalone web administration panel, a dynamic multi-provider AI fallback engine supporting both OpenAI and Anthropic standards, multi-language internationalization (English & Indonesian), token savings caching, and an automated zero-dependency PKZIP backup system.
 
 ---
 
 ## Key Features
 
 ### 1. Telegram Bot Assistant
+- **Multi-Language Support (EN & ID):** English default with easy `/language` switching to casual Bahasa Indonesia via inline buttons; all prompts, questions, hints, and explanations strictly adhere to the user's active language.
+- **Intelligent Token & Response Caching:** In-memory SHA-256 LRU/TTL cache (`cache.js`) coupled with Anthropic ephemeral cache headers to cut token consumption and latency on repetitive study topics.
 - **Interactive Exam Quizzes:** Generates multiple-choice quizzes on demand via `/quiz` or `/quiz <topic>` with strict JSON schema validation and automatic truncation repair.
 - **Structured 3-Point Conceptual Tutor:** Delivers concise explanations covering Core Concept, Key Formula/Mechanism, and Quick Tips/Exam Traps.
 - **Clean Math Rendering:** Automatically transforms LaTeX mathematical syntax into readable Unicode characters for native Telegram display.
@@ -103,12 +110,14 @@ Once the service is running:
 gampangbot/
 ├── index.js          # Main entry point, initializes port 3000 and port 5050 servers
 ├── bot.js            # Telegram router, quiz state machine, sendSmart, and broadcast engine
-├── llm.js            # Dynamic AI execution, multi-provider fallback, and JSON repair
+├── llm.js            # Dynamic AI execution, multi-provider fallback, prompt caching, JSON repair
 ├── providers.js      # Dynamic provider registry, health probes, and quarantine manager
 ├── panel.js          # Standalone HTTP web server on port 5050 and admin dashboard UI
 ├── panel_auth.js     # Token session management and password hashing
-├── store.js          # Atomic user quota and premium persistence to data/users.json
+├── store.js          # Atomic user quota, language settings, and premium persistence to data/users.json
 ├── backup.js         # Zero-dependency PKZIP generator and 05:00 UTC scheduler
+├── i18n.js           # Multi-language string dictionaries (EN default, ID) and prompt factories
+├── cache.js          # In-memory SHA-256 response & prompt cache with TTL and token savings tracking
 ├── quiz.js           # Multiple-choice quiz generator and conceptual tutor prompts
 ├── math.js           # Regex pipeline converting LaTeX to clean Telegram Unicode
 ├── data/

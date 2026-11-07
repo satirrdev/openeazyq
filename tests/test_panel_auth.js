@@ -167,6 +167,61 @@ async function runTests() {
     assert.strictEqual(panelAuth.extractSessionToken(reqInvalid), null, 'Should return null when neither admin_session nor Bearer matches');
     console.log('  Passed Test 5.\n');
 
+    // Test 6: hashPasswordAsync & verifyPasswordAsync
+    console.log('Test 6: Async hashing and verification...');
+    const asyncHash = await panelAuth.hashPasswordAsync('testPass123', 'staticSalt16Bytes');
+    const syncHash = panelAuth.hashPassword('testPass123', 'staticSalt16Bytes');
+    assert.strictEqual(asyncHash, syncHash, 'Async and sync hash results must match');
+    assert.strictEqual(await panelAuth.verifyPasswordAsync('adminSuperSecret2026'), true, 'verifyPasswordAsync must return true for current password');
+    assert.strictEqual(await panelAuth.verifyPasswordAsync('wrongSecret'), false, 'verifyPasswordAsync must return false for wrong password');
+    assert.strictEqual(await panelAuth.verifyPasswordAsync(''), false, 'verifyPasswordAsync must return false for empty string');
+    assert.strictEqual(await panelAuth.verifyPasswordAsync(null), false, 'verifyPasswordAsync must return false for null');
+    console.log('  Passed Test 6.\n');
+
+    // Test 7: In-memory IP rate limiter
+    console.log('Test 7: In-memory IP rate limiter...');
+    const testIp = '198.51.100.42';
+    panelAuth.resetRateLimit(testIp);
+
+    let rateCheck = panelAuth.checkRateLimit(testIp);
+    assert.strictEqual(rateCheck.allowed, true);
+    assert.strictEqual(rateCheck.remainingAttempts, 5);
+    assert.strictEqual(rateCheck.retryAfterSec, 0);
+
+    for (let i = 1; i <= 4; i++) {
+      panelAuth.recordLoginFailure(testIp);
+      rateCheck = panelAuth.checkRateLimit(testIp);
+      assert.strictEqual(rateCheck.allowed, true);
+      assert.strictEqual(rateCheck.remainingAttempts, 5 - i);
+    }
+
+    // 5th failure triggers lockout
+    panelAuth.recordLoginFailure(testIp);
+    rateCheck = panelAuth.checkRateLimit(testIp);
+    assert.strictEqual(rateCheck.allowed, false);
+    assert.strictEqual(rateCheck.remainingAttempts, 0);
+    assert.ok(rateCheck.retryAfterSec > 0 && rateCheck.retryAfterSec <= 900);
+
+    // resetRateLimit clears lockout
+    panelAuth.resetRateLimit(testIp);
+    rateCheck = panelAuth.checkRateLimit(testIp);
+    assert.strictEqual(rateCheck.allowed, true);
+    assert.strictEqual(rateCheck.remainingAttempts, 5);
+
+    // Sliding window expiration
+    const expireIp = '198.51.100.99';
+    for (let i = 0; i < 5; i++) {
+      panelAuth.recordLoginFailure(expireIp);
+    }
+    assert.strictEqual(panelAuth.checkRateLimit(expireIp).allowed, false);
+    // Artificially age the timestamp beyond LOCKOUT_MS
+    const record = panelAuth.loginFailures.get(expireIp);
+    record.timestamp = Date.now() - (15 * 60 * 1000 + 1000);
+    rateCheck = panelAuth.checkRateLimit(expireIp);
+    assert.strictEqual(rateCheck.allowed, true, 'Expired lockout must reset allowed to true');
+    assert.strictEqual(rateCheck.remainingAttempts, 5);
+    console.log('  Passed Test 7.\n');
+
     console.log('ALL TESTS PASSED SUCCESSFULLY! 🚀');
   } finally {
     cleanup();

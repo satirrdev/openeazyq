@@ -3,6 +3,27 @@
 All notable changes to GampangBot are documented in this file.
 This project adheres to Semantic Versioning.
 
+## [v1.0.0c] - 2026-11-08
+
+### Added
+- **Multi-Language Support (i18n):**
+  - Full bilingual support with English set as default (`'en'`) and optional casual Bahasa Indonesia (`'id'`).
+  - `/language` interactive command with inline buttons (`[ 🇬🇧 English ]` and `[ 🇮🇩 Bahasa Indonesia ]`).
+  - Registered `/language` command in Telegram bot command menu shortcuts (`setMyCommands`).
+  - Central `i18n.js` dictionary and prompt generators ensuring all UI feedback and LLM outputs (quizzes, explanations, clues) follow the user's active language.
+  - Per-user language persistence stored in `data/users.json` via `store.js` (`getUserLanguage`, `setUserLanguage`).
+- **Token & Response Caching:**
+  - Zero-dependency in-memory LRU/TTL cache (`cache.js`) with SHA-256 content hashing to avoid redundant LLM calls and reduce API costs.
+  - Upstream prompt caching support in `llm.js` (Anthropic ephemeral cache headers, static prefix structure, and completion cached token usage metrics).
+  - Estimated token savings metrics tracked live in cache stats.
+
+## [v1.0.0b] - 2026-11-06
+
+### Security & Hardening
+- Async scrypt password verification and brute-force IP rate limiting (Issue 3).
+- SSRF protection on AI provider base URLs with private IP & cloud metadata blocking (Issue 4).
+- DOM XSS remediation across dashboard action buttons using data attributes and HTML entity escaping (Issue 5).
+
 ## [v1.0.0a] - 2026-11-06
 
 ### Fixed
@@ -25,7 +46,7 @@ This project adheres to Semantic Versioning.
 
 #### [Added] - Admin Panel & Authentication
 - Embedded HTTP web server on port 5050 (`process.env.PANEL_PORT || 5050`) using Node.js built-in `http` module.
-- Password protection with default `123456`, changeable directly from the admin dashboard.
+- Password protection with a strong default `123456` on fresh install, changeable directly from the admin dashboard.
 - Cryptographically secure session management with token-based cookie authentication.
 - Responsive, high-contrast dark slate dashboard UI compliant with WCAG AA accessibility standards.
 - Full keyboard navigation and clean semantic structure with zero external frontend libraries.

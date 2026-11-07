@@ -39,19 +39,34 @@ const store = require('../store');
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const TMP_FILE = path.join(DATA_DIR, 'users.json.tmp');
+const PROVIDERS_FILE = path.join(DATA_DIR, 'providers.json');
+const PROVIDERS_TMP = path.join(DATA_DIR, 'providers.json.tmp');
 
 let originalUsersFileExisted = false;
 let originalUsersFileContent = null;
+let originalProvidersFileExisted = false;
+let originalProvidersFileContent = null;
 
 if (fs.existsSync(USERS_FILE)) {
   originalUsersFileExisted = true;
   originalUsersFileContent = fs.readFileSync(USERS_FILE, 'utf8');
 }
 
+if (fs.existsSync(PROVIDERS_FILE)) {
+  originalProvidersFileExisted = true;
+  originalProvidersFileContent = fs.readFileSync(PROVIDERS_FILE, 'utf8');
+  try {
+    fs.unlinkSync(PROVIDERS_FILE);
+  } catch (_) {}
+}
+
 function restorePersistenceState() {
   try {
     if (fs.existsSync(TMP_FILE)) {
       fs.unlinkSync(TMP_FILE);
+    }
+    if (fs.existsSync(PROVIDERS_TMP)) {
+      fs.unlinkSync(PROVIDERS_TMP);
     }
   } catch (_) {}
 
@@ -60,6 +75,12 @@ function restorePersistenceState() {
       fs.writeFileSync(USERS_FILE, originalUsersFileContent, 'utf8');
     } else if (fs.existsSync(USERS_FILE)) {
       fs.writeFileSync(USERS_FILE, '{}', 'utf8');
+    }
+  } catch (_) {}
+
+  try {
+    if (originalProvidersFileExisted && originalProvidersFileContent !== null) {
+      fs.writeFileSync(PROVIDERS_FILE, originalProvidersFileContent, 'utf8');
     }
   } catch (_) {}
 }
@@ -1398,7 +1419,7 @@ function registerAllSuites() {
         assert.ok(s.imageBase64 && s.imageBase64.startsWith('data:image/jpeg;base64,'));
 
         const lastMsg = sentMessages[sentMessages.length - 1];
-        assert.ok(lastMsg.text.includes('dapet gambarnya! 📸'));
+        assert.ok(lastMsg.text.includes('dapet gambarnya! 📸') || lastMsg.text.includes('Got your image! 📸'));
         assert.ok(lastMsg.opts && lastMsg.opts.reply_markup);
       } finally {
         global.fetch = originalFetch;
@@ -1434,7 +1455,7 @@ function registerAllSuites() {
         assert.ok(s.imageBase64 && s.imageBase64.startsWith('data:image/png;base64,'));
 
         const lastMsg = sentMessages[sentMessages.length - 1];
-        assert.ok(lastMsg.text.includes('dapet gambarnya! 📸'));
+        assert.ok(lastMsg.text.includes('dapet gambarnya! 📸') || lastMsg.text.includes('Got your image! 📸'));
       } finally {
         global.fetch = originalFetch;
       }
@@ -1464,7 +1485,7 @@ function registerAllSuites() {
       assert.strictEqual(s.state, 'AWAITING_ANSWER');
       assert.ok(s.quiz);
       const lastMsg = sentMessages[sentMessages.length - 1];
-      assert.ok(lastMsg.text.includes('soalnya udah dikunci 🔒'));
+      assert.ok(lastMsg.text.includes('soalnya udah dikunci 🔒') || lastMsg.text.includes('locked 🔒'));
     });
 
     test('7.5 In-memory imageBase64 is cleared after handleQuiz completes', async () => {
@@ -1691,7 +1712,7 @@ function registerAllSuites() {
       assert.strictEqual(s.imageBase64, null, 'ImageBase64 must be null');
 
       const resetConfirmation = sentMessages.find(
-        (m) => m.chatId === chatId && m.text.includes('Memori obrolan berhasil di-reset!')
+        (m) => m.chatId === chatId && (m.text.includes('berhasil di-reset!') || m.text.includes('Memory cleared!') || m.text.includes('reset!'))
       );
       assert.ok(resetConfirmation, 'Must send reset confirmation message to user');
     });
@@ -1734,7 +1755,7 @@ function registerAllSuites() {
           'History must be cleared when text > 400 chars is uploaded'
         );
         const lastTextMsg = sentMessages[sentMessages.length - 1];
-        assert.ok(lastTextMsg.text.includes('Mau gw apain nih?'));
+        assert.ok(lastTextMsg.text.includes('Mau gw apain nih?') || lastTextMsg.text.includes('What would you like me to do?'));
 
         // Case B: Fresh image upload clears history
         const chatIdImage = 80052;
@@ -1759,7 +1780,7 @@ function registerAllSuites() {
           'History must be cleared when fresh photo is uploaded'
         );
         const lastImageMsg = sentMessages[sentMessages.length - 1];
-        assert.ok(lastImageMsg.text.includes('dapet gambarnya! 📸'));
+        assert.ok(lastImageMsg.text.includes('dapet gambarnya! 📸') || lastImageMsg.text.includes('Got your image! 📸'));
       } finally {
         global.fetch = originalFetch;
       }
@@ -1870,7 +1891,7 @@ function registerAllSuites() {
       assert.strictEqual(s.state, 'IDLE');
 
       const lastMsg = sentMessages[sentMessages.length - 1];
-      assert.ok(lastMsg.text.includes('Mau gw apain nih?'));
+      assert.ok(lastMsg.text.includes('Mau gw apain nih?') || lastMsg.text.includes('What would you like me to do?'));
       assert.ok(lastMsg.opts && lastMsg.opts.reply_markup);
       assert.deepStrictEqual(
         lastMsg.opts.reply_markup.inline_keyboard[0].map((b) => b.callback_data),

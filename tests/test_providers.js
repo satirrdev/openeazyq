@@ -1,3 +1,5 @@
+process.env.NODE_ENV = 'test';
+
 const assert = require('assert').strict;
 const fs = require('fs');
 const path = require('path');
@@ -336,6 +338,123 @@ async function runTests() {
     assert.strictEqual(stopped, true, 'Scheduler stop returns true');
     assert.strictEqual(providersModule.isHealthSchedulerRunning(), false, 'Scheduler is now stopped');
     console.log('  Passed Test 9.\n');
+
+    // -------------------------------------------------------------
+    // Test 10: SSRF Protection & validateBaseURL (Task 3)
+    // -------------------------------------------------------------
+    console.log('Test 10: SSRF Protection & validateBaseURL checks...');
+    assert.strictEqual(typeof providersModule.isPrivateOrLoopbackHost, 'function');
+    assert.strictEqual(typeof providersModule.validateBaseURL, 'function');
+
+    const privateHosts = [
+      'localhost',
+      'foo.localhost',
+      '0.0.0.0',
+      '127.0.0.1',
+      '127.255.255.255',
+      '10.0.0.1',
+      '10.254.254.254',
+      '172.16.0.1',
+      '172.31.255.255',
+      '192.168.0.1',
+      '192.168.1.100',
+      '169.254.169.254',
+      '100.64.0.1',
+      '100.127.255.255',
+      '2130706433', // 127.0.0.1 dword
+      '0x7f000001', // 127.0.0.1 hex
+      '0177.0.0.1', // 127.0.0.1 octal
+      '::1',
+      '[::1]',
+      '[::1]:8080',
+      'fe80::1',
+      'fc00::1',
+      'fd12:3456::1',
+      '::ffff:127.0.0.1',
+      '::ffff:192.168.1.1',
+      'metadata.google.internal',
+      'sub.metadata.google.internal',
+    ];
+
+    for (const h of privateHosts) {
+      assert.strictEqual(providersModule.isPrivateOrLoopbackHost(h), true, `Host "${h}" must be identified as private/loopback`);
+    }
+
+    const publicHosts = [
+      'api.openai.com',
+      'api.anthropic.com',
+      'tokenharbor.ai',
+      '8.8.8.8',
+      '1.1.1.1',
+      '172.32.0.1',
+      '100.128.0.1',
+      '::ffff:8.8.8.8',
+    ];
+
+    for (const h of publicHosts) {
+      assert.strictEqual(providersModule.isPrivateOrLoopbackHost(h), false, `Host "${h}" must be identified as public`);
+    }
+
+    // Protocol checks
+    assert.throws(() => providersModule.validateBaseURL('ftp://api.example.com'), /Protokol baseURL harus http: atau https:/);
+    assert.throws(() => providersModule.validateBaseURL('javascript:alert(1)'), /Protokol baseURL harus http: atau https:/);
+    assert.throws(() => providersModule.validateBaseURL('not-a-valid-url'), /Format baseURL tidak valid/);
+
+    // SSRF enforcement under production mode
+    const oldNodeEnv = process.env.NODE_ENV;
+    const oldAllowPrivate = process.env.ALLOW_PRIVATE_AI_HOSTS;
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.ALLOW_PRIVATE_AI_HOSTS;
+
+      assert.throws(
+        () => providersModule.validateBaseURL('http://localhost:8080/v1'),
+        /BaseURL tidak boleh mengarah ke localhost atau IP privat/
+      );
+      assert.throws(
+        () => providersModule.validateBaseURL('http://169.254.169.254/latest/meta-data/'),
+        /BaseURL tidak boleh mengarah ke localhost atau IP privat/
+      );
+      assert.throws(
+        () => providersModule.validateBaseURL('http://metadata.google.internal/computeMetadata/v1/'),
+        /BaseURL tidak boleh mengarah ke localhost atau IP privat/
+      );
+      assert.strictEqual(
+        providersModule.validateBaseURL('https://api.openai.com/v1'),
+        'https://api.openai.com/v1'
+      );
+
+      // addProvider rejects private IP in production
+      assert.throws(
+        () => providersModule.addProvider({
+          name: 'Evil Provider',
+          type: 'openai',
+          baseURL: 'http://127.0.0.1:8000',
+          model: 'm',
+        }),
+        /BaseURL tidak boleh mengarah ke localhost atau IP privat/
+      );
+
+      // updateProvider rejects private IP in production
+      assert.throws(
+        () => providersModule.updateProvider('provider_primary', {
+          baseURL: 'http://169.254.169.254',
+        }),
+        /BaseURL tidak boleh mengarah ke localhost atau IP privat/
+      );
+
+      // Test bypass with ALLOW_PRIVATE_AI_HOSTS='true'
+      process.env.ALLOW_PRIVATE_AI_HOSTS = 'true';
+      assert.doesNotThrow(() => providersModule.validateBaseURL('http://localhost:8080/v1'));
+    } finally {
+      process.env.NODE_ENV = oldNodeEnv;
+      if (oldAllowPrivate !== undefined) {
+        process.env.ALLOW_PRIVATE_AI_HOSTS = oldAllowPrivate;
+      } else {
+        delete process.env.ALLOW_PRIVATE_AI_HOSTS;
+      }
+    }
+    console.log('  Passed Test 10.\n');
 
     console.log('=== All Task 3 and Task 4 Tests Passed Successfully! ===\n');
   } finally {

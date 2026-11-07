@@ -142,6 +142,40 @@ async function runTests() {
     assert.ok(authDashboardRes.body.includes('OpenEazyQ Panel'), 'Dashboard HTML should contain brand');
     console.log('  Passed Test 3.\n');
 
+    // 3b. Rate limiting on login attempts
+    console.log('Test 3b: Rate limiting on 5 failed login attempts...');
+    const rateLimitIp = '203.0.113.50';
+    for (let i = 0; i < 5; i++) {
+      const failRes = await request({
+        hostname: '127.0.0.1',
+        port: TEST_PORT,
+        path: '/api/auth/login',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-forwarded-for': `${rateLimitIp}, 198.51.100.1`,
+        },
+      }, { password: 'badpassword' });
+      assert.strictEqual(failRes.statusCode, 401);
+    }
+    const blockedRes = await request({
+      hostname: '127.0.0.1',
+      port: TEST_PORT,
+      path: '/api/auth/login',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-forwarded-for': rateLimitIp,
+      },
+    }, { password: 'badpassword' });
+    assert.strictEqual(blockedRes.statusCode, 429);
+    assert.ok(blockedRes.headers['retry-after'], 'Response must include Retry-After header');
+    assert.strictEqual(blockedRes.json.error, 'Too many failed login attempts. Please try again later.');
+
+    assert.strictEqual(panel.getClientIp({ headers: { 'x-forwarded-for': '1.2.3.4, 5.6.7.8' } }), '1.2.3.4');
+    assert.strictEqual(panel.getClientIp({ socket: { remoteAddress: '127.0.0.1' } }), '127.0.0.1');
+    console.log('  Passed Test 3b.\n');
+
     // 4. Global limit customization API test (1 to infinity)
     console.log('Test 4: Testing global quota limits customization (1 to infinity)...');
     const getLimitsRes = await request({

@@ -1163,11 +1163,11 @@ function getDashboardHtml() {
           '<td>' + statusBadge + '</td>' +
           '<td>' + latencyDisplay + '</td>' +
           '<td><div class=\"flex-row\">' +
-            '<button class=\"btn btn-secondary btn-sm\" onclick=\"testSingleProvider(\\'' + p.id + '\\')\">Test</button>' +
-            '<button class=\"btn btn-secondary btn-sm\" onclick=\"openEditProviderModal(\\'' + p.id + '\\')\">Edit</button>' +
+            '<button class=\"btn btn-secondary btn-sm\" data-id=\"' + escapeHtml(p.id) + '\" onclick=\"testSingleProvider(this.dataset.id)\">Test</button>' +
+            '<button class=\"btn btn-secondary btn-sm\" data-id=\"' + escapeHtml(p.id) + '\" onclick=\"openEditProviderModal(this.dataset.id)\">Edit</button>' +
             (idx > 0 ? '<button class=\"btn btn-secondary btn-sm\" onclick=\"moveProviderUp(' + idx + ')\">▲</button>' : '') +
             (idx < globalProviders.length - 1 ? '<button class=\"btn btn-secondary btn-sm\" onclick=\"moveProviderDown(' + idx + ')\">▼</button>' : '') +
-            '<button class=\"btn btn-danger btn-sm\" onclick=\"deleteProviderItem(\\'' + p.id + '\\')\">Delete</button>' +
+            '<button class=\"btn btn-danger btn-sm\" data-id=\"' + escapeHtml(p.id) + '\" onclick=\"deleteProviderItem(this.dataset.id)\">Delete</button>' +
           '</div></td>' +
         '</tr>';
       }).join('');
@@ -1230,10 +1230,10 @@ function getDashboardHtml() {
           '<td>' + u.imageCount + ' / ' + (u.imageLimit === 'unlimited' ? '∞' : u.imageLimit) + '</td>' +
           '<td><small>' + expiryStr + '</small></td>' +
           '<td><div class=\"flex-row\">' +
-            '<button class=\"btn btn-secondary btn-sm\" onclick=\"openPremiumModal(\\'' + u.userId + '\\')\">+ Days</button>' +
-            '<button class=\"btn btn-secondary btn-sm\" onclick=\"openCustomLimitModal(\\'' + u.userId + '\\')\">Limit</button>' +
-            '<button class=\"btn btn-secondary btn-sm\" onclick=\"resetUserQuotaItem(\\'' + u.userId + '\\')\">Reset</button>' +
-            '<button class=\"btn btn-danger btn-sm\" onclick=\"deleteUserItem(\\'' + u.userId + '\\')\">Delete</button>' +
+            '<button class=\"btn btn-secondary btn-sm\" data-user-id=\"' + escapeHtml(u.userId) + '\" onclick=\"openPremiumModal(this.dataset.userId)\">+ Days</button>' +
+            '<button class=\"btn btn-secondary btn-sm\" data-user-id=\"' + escapeHtml(u.userId) + '\" onclick=\"openCustomLimitModal(this.dataset.userId)\">Limit</button>' +
+            '<button class=\"btn btn-secondary btn-sm\" data-user-id=\"' + escapeHtml(u.userId) + '\" onclick=\"resetUserQuotaItem(this.dataset.userId)\">Reset</button>' +
+            '<button class=\"btn btn-danger btn-sm\" data-user-id=\"' + escapeHtml(u.userId) + '\" onclick=\"deleteUserItem(this.dataset.userId)\">Delete</button>' +
           '</div></td>' +
         '</tr>';
       }).join('');
@@ -1697,7 +1697,7 @@ function getDashboardHtml() {
     }
 
     function escapeHtml(str) {
-      if (!str) return '';
+      if (str === null || str === undefined) return '';
       return String(str)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -1713,6 +1713,14 @@ function getDashboardHtml() {
 </html>`;
 }
 
+function getClientIp(req) {
+  const forwarded = req && req.headers && req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.length > 0) {
+    return forwarded.split(',')[0].trim();
+  }
+  return (req && req.socket && req.socket.remoteAddress) || '';
+}
+
 function handleAuthCheck(req, res) {
   const token = auth.extractSessionToken(req);
   const isValid = auth.verifySession(token);
@@ -1722,10 +1730,22 @@ function handleAuthCheck(req, res) {
 async function handleApi(req, res, pathname) {
   // Public auth endpoint: login
   if (pathname === '/api/auth/login' && req.method === 'POST') {
+    const clientIp = getClientIp(req);
+    const limit = auth.checkRateLimit(clientIp);
+    if (!limit.allowed) {
+      res.writeHead(429, {
+        'Content-Type': 'application/json',
+        'Retry-After': String(limit.retryAfterSec),
+      });
+      res.end(JSON.stringify({ error: 'Too many failed login attempts. Please try again later.' }));
+      return;
+    }
+
     try {
       const body = await parseJsonBody(req);
-      const valid = auth.verifyPassword(body.password);
+      const valid = await auth.verifyPasswordAsync(body.password);
       if (valid) {
+        auth.resetRateLimit(clientIp);
         const token = auth.createSession();
         res.writeHead(200, {
           'Content-Type': 'application/json',
@@ -1734,6 +1754,7 @@ async function handleApi(req, res, pathname) {
         res.end(JSON.stringify({ success: true, token }));
         return;
       }
+      auth.recordLoginFailure(clientIp);
       return sendJson(res, 401, { error: 'Invalid password' });
     } catch (err) {
       return sendJson(res, 400, { error: err.message });
@@ -1766,7 +1787,8 @@ async function handleApi(req, res, pathname) {
   if (pathname === '/api/auth/password' && req.method === 'POST') {
     try {
       const body = await parseJsonBody(req);
-      if (!auth.verifyPassword(body.currentPassword)) {
+      const valid = await auth.verifyPasswordAsync(body.currentPassword);
+      if (!valid) {
         return sendJson(res, 400, { error: 'Current password is incorrect' });
       }
       auth.changePassword(body.newPassword);
@@ -2070,6 +2092,7 @@ module.exports = {
   stopPanelServer,
   getLoginHtml,
   getDashboardHtml,
+  getClientIp,
 };
 
 if (require.main === module) {

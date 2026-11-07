@@ -7,6 +7,138 @@ const DATA_DIR = path.join(__dirname, 'data');
 const PROVIDERS_FILE = path.join(DATA_DIR, 'providers.json');
 const TMP_FILE = path.join(DATA_DIR, 'providers.json.tmp');
 
+function parseIPv4(str) {
+  if (!/^[\d.xa-fA-F]+$/.test(str)) return null;
+  const parts = str.split('.');
+  if (parts.length > 4 || parts.length < 1) return null;
+  if (parts.some((p) => p.length === 0)) return null;
+  const vals = [];
+  for (const p of parts) {
+    let v;
+    if (/^0x[0-9a-f]+$/i.test(p)) v = parseInt(p, 16);
+    else if (/^0[0-7]+$/.test(p)) v = parseInt(p, 8);
+    else if (/^\d+$/.test(p)) v = parseInt(p, 10);
+    else return null;
+    if (isNaN(v) || v < 0) return null;
+    vals.push(v);
+  }
+  let ip = 0;
+  if (vals.length === 1) {
+    if (vals[0] > 0xffffffff) return null;
+    ip = vals[0];
+  } else if (vals.length === 2) {
+    if (vals[0] > 0xff || vals[1] > 0xffffff || vals[0] < 0) return null;
+    ip = (vals[0] << 24) | vals[1];
+  } else if (vals.length === 3) {
+    if (vals[0] > 0xff || vals[1] > 0xff || vals[2] > 0xffff || vals[0] < 0 || vals[1] < 0) return null;
+    ip = (vals[0] << 24) | (vals[1] << 16) | vals[2];
+  } else if (vals.length === 4) {
+    if (vals[0] > 0xff || vals[1] > 0xff || vals[2] > 0xff || vals[3] > 0xff) return null;
+    ip = (vals[0] << 24) | (vals[1] << 16) | (vals[2] << 8) | vals[3];
+  }
+  return ip >>> 0;
+}
+
+function isPrivateIPv4(u) {
+  if (typeof u !== 'number' || isNaN(u)) return false;
+  if ((u >>> 24) === 0) return true; // 0.0.0.0/8
+  if ((u >>> 24) === 10) return true; // 10.0.0.0/8
+  if ((u >>> 24) === 127) return true; // 127.0.0.0/8
+  if ((u >>> 20) === 0xac1) return true; // 172.16.0.0/12
+  if ((u >>> 16) === 0xc0a8) return true; // 192.168.0.0/16
+  if ((u >>> 16) === 0xa9fe) return true; // 169.254.0.0/16
+  if ((u >>> 22) === 401) return true; // 100.64.0.0/10
+  if (u === 0xffffffff) return true; // 255.255.255.255
+  return false;
+}
+
+function isPrivateIPv6(str) {
+  let s = str.replace(/^\[|\]$/g, '').trim().toLowerCase();
+  let ipv4Part = null;
+  if (s.includes('.')) {
+    const lastColon = s.lastIndexOf(':');
+    if (lastColon === -1) return false;
+    ipv4Part = s.slice(lastColon + 1);
+    s = s.slice(0, lastColon) + ':0:0';
+  }
+  const doubleColon = s.indexOf('::');
+  let words = [];
+  if (doubleColon !== -1) {
+    const left = s.slice(0, doubleColon);
+    const right = s.slice(doubleColon + 2);
+    const head = left ? left.split(':').map((x) => parseInt(x, 16)) : [];
+    const tail = right ? right.split(':').map((x) => parseInt(x, 16)) : [];
+    if (head.some(isNaN) || tail.some(isNaN)) return false;
+    const missing = 8 - (head.length + tail.length);
+    if (missing < 0) return false;
+    words = [...head, ...Array(missing).fill(0), ...tail];
+  } else {
+    words = s.split(':').map((x) => parseInt(x, 16));
+    if (words.length !== 8 || words.some(isNaN)) return false;
+  }
+  if (words.every((w) => w === 0)) return true;
+  if (words.slice(0, 7).every((w) => w === 0) && words[7] === 1) return true;
+  if ((words[0] & 0xffc0) === 0xfe80) return true;
+  if ((words[0] & 0xfe00) === 0xfc00) return true;
+  if (words.slice(0, 5).every((w) => w === 0) && words[5] === 0xffff) {
+    let ip4Int = null;
+    if (ipv4Part) {
+      ip4Int = parseIPv4(ipv4Part);
+    } else {
+      ip4Int = (((words[6] || 0) << 16) | (words[7] || 0)) >>> 0;
+    }
+    if (ip4Int !== null && isPrivateIPv4(ip4Int)) return true;
+  }
+  return false;
+}
+
+function isPrivateOrLoopbackHost(hostname) {
+  if (!hostname || typeof hostname !== 'string') return true;
+  let h = hostname.trim().toLowerCase();
+  if (h.startsWith('[') && h.includes(']')) {
+    h = h.slice(1, h.indexOf(']'));
+  } else if (/^[^:]+:\d+$/.test(h)) {
+    h = h.split(':')[0];
+  }
+  h = h.replace(/\.+$/, '');
+
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h === 'metadata.google.internal' || h.endsWith('.metadata.google.internal')) return true;
+  if (h === 'metadata' || h === 'instance-data') return true;
+  if (h === '0.0.0.0') return true;
+
+  const ip4 = parseIPv4(h);
+  if (ip4 !== null) {
+    return isPrivateIPv4(ip4);
+  }
+
+  return isPrivateIPv6(h);
+}
+
+function validateBaseURL(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('Field baseURL wajib diisi');
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch (_) {
+    throw new Error('Format baseURL tidak valid: bukan URL yang benar');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Protokol baseURL harus http: atau https:');
+  }
+
+  const bypass = process.env.NODE_ENV === 'test' || process.env.ALLOW_PRIVATE_AI_HOSTS === 'true';
+  if (!bypass && isPrivateOrLoopbackHost(parsed.hostname)) {
+    throw new Error('BaseURL tidak boleh mengarah ke localhost atau IP privat (SSRF protection)');
+  }
+
+  return rawUrl.trim();
+}
+
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -112,6 +244,7 @@ function addProvider(data) {
   if (!data.model || typeof data.model !== 'string' || !data.model.trim()) {
     throw new Error('Field model wajib diisi');
   }
+  validateBaseURL(data.baseURL);
 
   const id = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   const newProvider = {
@@ -146,6 +279,10 @@ function updateProvider(id, patch) {
   const provider = providers.find((p) => p.id === id);
   if (!provider) {
     return null;
+  }
+
+  if (patch.baseURL !== undefined) {
+    validateBaseURL(patch.baseURL);
   }
 
   for (const [key, val] of Object.entries(patch)) {
@@ -381,6 +518,8 @@ function reloadProviders() {
 module.exports = {
   DATA_DIR,
   PROVIDERS_FILE,
+  isPrivateOrLoopbackHost,
+  validateBaseURL,
   getProviders,
   getProvider,
   getActiveProviders,

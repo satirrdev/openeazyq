@@ -1,13 +1,19 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const util = require('util');
+
+const scryptAsync = util.promisify(crypto.scrypt);
 
 const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'panel_config.json');
 const TMP_FILE = path.join(DATA_DIR, 'panel_config.json.tmp');
 const SESSION_TTL_MS = 86400000; // 24 hours
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
 
 const sessions = new Map();
+const loginFailures = new Map();
 let cachedConfig = null;
 
 function ensureDataDir() {
@@ -18,6 +24,11 @@ function ensureDataDir() {
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+async function hashPasswordAsync(password, salt) {
+  const buf = await scryptAsync(password, salt, 64);
+  return buf.toString('hex');
 }
 
 function savePanelConfig(cfg) {
@@ -80,6 +91,34 @@ function verifyPassword(inputPassword) {
 
   try {
     const computedHash = hashPassword(inputPassword, salt);
+    const computedBuf = Buffer.from(computedHash, 'hex');
+    const storedBuf = Buffer.from(storedHash, 'hex');
+
+    if (computedBuf.length !== storedBuf.length) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(computedBuf, storedBuf);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function verifyPasswordAsync(inputPassword) {
+  if (typeof inputPassword !== 'string' || inputPassword.length === 0) {
+    return false;
+  }
+
+  const cfg = getConfig();
+  const salt = cfg?.salt;
+  const storedHash = cfg?.passwordHash || cfg?.hash;
+
+  if (!salt || !storedHash) {
+    return false;
+  }
+
+  try {
+    const computedHash = await hashPasswordAsync(inputPassword, salt);
     const computedBuf = Buffer.from(computedHash, 'hex');
     const storedBuf = Buffer.from(storedHash, 'hex');
 
@@ -182,11 +221,60 @@ function extractSessionToken(req) {
   return null;
 }
 
+// ponytail: in-memory Map clears on restart; add Redis backing if multi-instance
+function checkRateLimit(ip) {
+  if (!ip) {
+    return { allowed: true, remainingAttempts: MAX_LOGIN_ATTEMPTS, retryAfterSec: 0 };
+  }
+  const record = loginFailures.get(ip);
+  if (!record) {
+    return { allowed: true, remainingAttempts: MAX_LOGIN_ATTEMPTS, retryAfterSec: 0 };
+  }
+  const now = Date.now();
+  const elapsed = now - record.timestamp;
+  if (elapsed >= LOCKOUT_MS) {
+    loginFailures.delete(ip);
+    return { allowed: true, remainingAttempts: MAX_LOGIN_ATTEMPTS, retryAfterSec: 0 };
+  }
+  if (record.count >= MAX_LOGIN_ATTEMPTS) {
+    const retryAfterSec = Math.max(1, Math.ceil((LOCKOUT_MS - elapsed) / 1000));
+    return { allowed: false, remainingAttempts: 0, retryAfterSec };
+  }
+  return {
+    allowed: true,
+    remainingAttempts: MAX_LOGIN_ATTEMPTS - record.count,
+    retryAfterSec: 0,
+  };
+}
+
+function recordLoginFailure(ip) {
+  if (!ip) return;
+  const now = Date.now();
+  const record = loginFailures.get(ip);
+  if (!record || (now - record.timestamp >= LOCKOUT_MS)) {
+    loginFailures.set(ip, { count: 1, timestamp: now });
+  } else {
+    record.count += 1;
+    record.timestamp = now;
+  }
+}
+
+function resetRateLimit(ip) {
+  if (!ip) return;
+  loginFailures.delete(ip);
+}
+
 // Initial configuration load upon module initialization
 cachedConfig = loadPanelConfig();
 
 module.exports = {
+  hashPassword,
+  hashPasswordAsync,
   verifyPassword,
+  verifyPasswordAsync,
+  checkRateLimit,
+  recordLoginFailure,
+  resetRateLimit,
   changePassword,
   createSession,
   verifySession,
@@ -195,6 +283,9 @@ module.exports = {
   loadPanelConfig,
   getConfig,
   sessions,
+  loginFailures,
+  MAX_LOGIN_ATTEMPTS,
+  LOCKOUT_MS,
   SESSION_TTL_MS,
   CONFIG_FILE,
 };

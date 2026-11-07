@@ -1,59 +1,18 @@
 const { ask, extractJson, ERROR_MSG, MODEL_DEEPSEEK, MODEL_MIMO } = require('./llm');
 const { latexToUnicode } = require('./math');
+const { responseCache } = require('./cache');
+const {
+  getQuizPrompt,
+  getExplainPrompt,
+  getHintPrompt,
+  QUIZ_SYSTEM_PROMPT_ID,
+  EXPLAIN_SYSTEM_PROMPT_ID,
+  HINT_SYSTEM_PROMPT_ID,
+} = require('./i18n');
 
-const QUIZ_SYSTEM_PROMPT = `You are GampangBot, an expert conceptual tutor and objective exam quiz generator for Indonesian high school/university students.
-Task: Create EXACTLY 1 multiple-choice question based on the study material provided by the user.
-
-CRITICAL CONSTRAINTS:
-1. You MUST return ONLY valid raw JSON without markdown code blocks or backticks. Output must start immediately with '{' and end with '}'.
-2. Required JSON Schema:
-{
-  "question": "Pertanyaan yang menguji pemahaman konsep",
-  "options": {
-    "A": "Teks pilihan A",
-    "B": "Teks pilihan B",
-    "C": "Teks pilihan C",
-    "D": "Teks pilihan D"
-  },
-  "correct_answer": "A",
-  "explanation": "Penjelasan konsep inti yang padat dan berbobot (solid, not too light) 1-2 kalimat kenapa jawaban tersebut benar."
-}
-3. Difficulty: Medium (focus on understanding concepts, not rote memorization).
-4. Output Language: MUST be in casual, clear Indonesian (Bahasa Indonesia santai, analogi praktis, mudah dipahami), regardless of the input language.
-5. Math formatting: write math in simple Unicode that works everywhere (contoh: x², √2, 3/4, π, ≤, ×). Do NOT use LaTeX commands like \\frac{}, \\sqrt{}, ^{}, $...$.
-6. Paragraphs and explanations must be solid, substantive, and conceptually deep, not too light or superficial.
-7. CRITICAL: Your ONLY job is to create ONE quiz question from the material. NEVER solve, derive, calculate, or explain the material's math. NEVER show working steps or derivations. In the explanation, state the conceptual principle directly without arithmetic derivations.
-8. Do not include verbose introductory greetings, conversational filler, or preamble. Output must start directly with '{' and end with '}'.`;
-
-const EXPLAIN_SYSTEM_PROMPT = `You are GampangBot, an expert conceptual tutor for Indonesian high school/university students.
-Task: Explain the core concepts from the input material clearly and concisely.
-
-CRITICAL CONSTRAINTS:
-1. Max length: Under 300 words total. Do NOT exceed this limit.
-2. Structure your output strictly into 3 bullet points:
-   - 🎯 Konsep Inti (1-2 sentences)
-   - ⚙️ Cara Kerja / Rumus Kunci (bullet points, max 4 lines)
-   - 💡 Jebakan Ujian / Tips Cepat (1-2 sentences)
-3. Do not include verbose introductory greetings or conversational filler.
-4. Language: Indonesian (gaya santai, analogi praktis, mudah dipahami).
-5. Output must be solid, substantive, and conceptually deep, not too light or superficial (penjelasan padat berbobot, to-the-point).
-6. Math formatting: write math in simple Unicode that works everywhere (contoh: x², √2, 3/4, π, ≤, ×). Do NOT use LaTeX commands like \\frac{}, \\sqrt{}, ^{}, $...$.`;
-
-const HINT_SYSTEM_PROMPT = `You are GampangBot, a firm but supportive quiz proctor for students.
-Context: The user is currently answering a locked multiple-choice quiz. The user sent a message that might be asking to CHANGE the question, or trying to fish for the answer.
-
-Task:
-1. Politely but firmly REFUSE to change, replace, or regenerate the question. The quiz is locked.
-2. Then give the user ONE helpful clue (petunjuk) about the CURRENT question that nudges their thinking in the right direction.
-
-Strict Rules:
-- Output MUST be in casual Indonesian (Bahasa Indonesia santai tapi jelas).
-- Start your first sentence with "Nope, soalnya udah dikunci 🔒" or a similar firm casual refusal.
-- NEVER reveal the correct answer, its letter (A/B/C/D), or its exact text.
-- Do NOT say which options are wrong/correct. No elimination hints.
-- Keep it short: 1 refusal sentence + max 2 sentences of clue.
-- Math formatting: write math in simple Unicode (x², √2, π, ≤, ×). Do NOT use LaTeX commands.
-- Format: plain text only, max 3 sentences total.`;
+const QUIZ_SYSTEM_PROMPT = QUIZ_SYSTEM_PROMPT_ID;
+const EXPLAIN_SYSTEM_PROMPT = EXPLAIN_SYSTEM_PROMPT_ID;
+const HINT_SYSTEM_PROMPT = HINT_SYSTEM_PROMPT_ID;
 
 // Truncate overly long material to stay within safe token limits
 const MAX_MATERIAL_CHARS = 1500;
@@ -100,22 +59,34 @@ function validateQuiz(obj) {
 }
 
 // Generate 1 MCQ from material or image with DeepSeek primary model and retry on bad JSON
-async function generateQuiz(material, imageBase64 = null) {
+async function generateQuiz(material, imageBase64 = null, opts = {}) {
+  const lang = (opts && opts.lang) || 'id';
+  const cacheKey = !imageBase64 && material ? responseCache.makeKey('quiz', lang, material) : null;
+  if (cacheKey) {
+    const cached = responseCache.get(cacheKey);
+    if (cached) return cached;
+  }
+
   const complexity = classifyComplexity(material);
   const primaryModel = MODEL_DEEPSEEK;
   const fallbackModel = imageBase64 ? null : MODEL_MIMO;
   const timeoutMs = imageBase64 || complexity === 'heavy' ? 45000 : 30000;
+  const systemPrompt = getQuizPrompt(lang);
 
+  const isEn = lang === 'en';
   const prompt = material && material.trim()
-    ? `Materi belajar dari user:\n\n${truncateMaterial(material)}`
-    : 'Analisis materi pelajaran pada gambar berikut dan buat 1 soal kuis pilihan ganda.';
+    ? (isEn ? `Study material from user:\n\n${truncateMaterial(material)}` : `Materi belajar dari user:\n\n${truncateMaterial(material)}`)
+    : (isEn ? 'Analyze the study material in the image below and create 1 multiple-choice quiz question.' : 'Analisis materi pelajaran pada gambar berikut dan buat 1 soal kuis pilihan ganda.');
+  const retrySuffix = isEn
+    ? '\n\n(CRITICAL: return ONLY valid JSON matching the schema, with no other text!)'
+    : '\n\n(PENTING: kembalikan HANYA JSON valid sesuai schema, tanpa teks lain!)';
   let lastErr = null;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const raw = await ask(
-        attempt === 0 ? prompt : prompt + '\n\n(PENTING: kembalikan HANYA JSON valid sesuai schema, tanpa teks lain!)',
-        QUIZ_SYSTEM_PROMPT,
+        attempt === 0 ? prompt : prompt + retrySuffix,
+        systemPrompt,
         {
           primaryModel,
           fallbackModel,
@@ -128,7 +99,10 @@ async function generateQuiz(material, imageBase64 = null) {
       );
       const json = extractJson(raw);
       const quiz = validateQuiz(json);
-      if (quiz) return quiz;
+      if (quiz) {
+        if (cacheKey) responseCache.set(cacheKey, quiz);
+        return quiz;
+      }
       lastErr = new Error('Quiz JSON tidak lolos validasi');
     } catch (e) {
       lastErr = e;
@@ -150,13 +124,16 @@ function buildQuizKeyboard() {
   };
 }
 
-function buildQuestionText(quiz) {
-  return `📝 *Kuis!*\n\n${quiz.question}\n\n` +
+function buildQuestionText(quiz, lang = 'id') {
+  const isEn = lang === 'en';
+  const header = isEn ? '📝 *Quiz!*' : '📝 *Kuis!*';
+  const footer = isEn ? 'Select your answer below 👇' : 'Pilih jawaban lu di bawah 👇';
+  return `${header}\n\n${quiz.question}\n\n` +
     `*A.* ${quiz.options.A}\n` +
     `*B.* ${quiz.options.B}\n` +
     `*C.* ${quiz.options.C}\n` +
     `*D.* ${quiz.options.D}\n\n` +
-    `Pilih jawaban lu di bawah 👇`;
+    `${footer}`;
 }
 
 module.exports = {
@@ -164,7 +141,11 @@ module.exports = {
   classifyComplexity,
   buildQuizKeyboard,
   buildQuestionText,
+  QUIZ_SYSTEM_PROMPT,
   EXPLAIN_SYSTEM_PROMPT,
   HINT_SYSTEM_PROMPT,
+  getQuizPrompt,
+  getExplainPrompt,
+  getHintPrompt,
   ERROR_MSG,
 };

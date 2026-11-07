@@ -229,6 +229,15 @@ async function executeModelCall(modelName, prompt, systemPrompt, opts = {}) {
     if (!content) {
       throw new Error(`Model ${modelName} returned empty response`);
     }
+    if (completion.usage) {
+      const cached =
+        completion.usage.prompt_tokens_details?.cached_tokens ||
+        completion.usage.cache_read_input_tokens ||
+        0;
+      if (cached > 0 && typeof opts.onCachedTokens === 'function') {
+        opts.onCachedTokens(cached);
+      }
+    }
     return content;
   } finally {
     clearTimeout(timer);
@@ -296,7 +305,13 @@ async function executeAnthropicCall(provider, prompt, systemPrompt, opts = {}) {
     messages,
   };
   if (systemPrompt) {
-    body.system = systemPrompt;
+    body.system = [
+      {
+        type: 'text',
+        text: systemPrompt,
+        cache_control: { type: 'ephemeral' },
+      },
+    ];
   }
   if (typeof opts.temperature === 'number') {
     body.temperature = opts.temperature;
