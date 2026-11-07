@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-1.0.0c-blue.svg)](CHANGELOG.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-%40GampanginBot-2CA5E0.svg?logo=telegram&logoColor=white)](https://t.me/GampanginBot)
 
 > **Open Source Project**  
@@ -133,4 +133,4 @@ gampangbot/
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the Apache-2.0 License. See the [LICENSE](LICENSE) file for details.
